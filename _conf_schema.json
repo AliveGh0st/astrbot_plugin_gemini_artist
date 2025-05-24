@@ -22,6 +22,12 @@
             "gemini-2.0-flash-preview-image-generation"
         ]
     },
+    "wait_time": {
+        "description": "等待时间",
+        "type": "int",
+        "hint": "机器人等待回复的时间",
+        "default": 30
+    },
     "robot_self_id": {
         "type": "string",
         "title": "机器人自身ID",
@@ -39,5 +45,21 @@
         "title": "随机选择API Key",
         "description": "启用后，将在可用的API Key中随机选择一个进行调用；禁用则按顺序轮询。",
         "default": false
+    },
+    "temp_cleanup_interval_seconds": {
+        "type": "int",
+        "name": "定时清理 - 执行间隔",
+        "description": "后台定时清理临时目录的间隔时间（秒）。0表示禁用定时清理。",
+        "hint": "默认为6小时",
+        "default": 21600,
+        "min": 0
+    },
+    "temp_cleanup_files_older_than_seconds": {
+        "type": "int",
+        "name": "定时清理 - 文件保留时长",
+        "description": "清理时，将清理临时目录中存放超过此外挂钩（秒）的文件。",
+        "hint": "默认为3天，最小值为1小时",
+        "default": 259200,
+        "min": 3600 
     }
 }

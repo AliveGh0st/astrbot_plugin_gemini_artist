@@ -16,9 +16,10 @@ from PIL import Image as PILImage
 from google.genai.types import HttpOptions
 from astrbot.core.utils.io import download_image_by_url
 import re
+import functools # 用于 asyncio.to_thread 的辅助
 
 
-@register("gemini_artist_plugin", "nichinichisou0609", "基于 Google Gemini 多模态模型的AI绘画插件", "1.0.0")
+@register("gemini_artist_plugin", "nichinichisou", "基于 Google Gemini 多模态模型的AI绘画插件", "1.1.0")
 class GeminiArtist(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -30,6 +31,7 @@ class GeminiArtist(Star):
         self.model_name_from_config = config.get("model_name", "gemini-2.0-flash-exp")
         self.group_whitelist = config.get("group_whitelist", [])
         self.random_api_key_selection = config.get("random_api_key_selection", False)
+        self.wait_time_from_config = config.get("wait_time", 30)
 
         # logger.info(f"GeminiExpPlugin __init__: Loaded robot_self_id: '{self.robot_id_from_config}'")
         # logger.info(f"GeminiExpPlugin __init__: Loaded group_whitelist: {self.group_whitelist}")
@@ -58,6 +60,70 @@ class GeminiArtist(Star):
         
         if not self.api_keys:
             logger.warning("Gemini API密钥未配置或配置为空。插件可能无法正常工作。")
+
+        # 定时清理相关配置
+        self.cleanup_interval_seconds = self.config.get("temp_cleanup_interval_seconds", 3600 * 6) # 默认6小时
+        self.cleanup_older_than_seconds = self.config.get("temp_cleanup_files_older_than_seconds", 86400 * 3) # 默认清理3天前的文件
+        self._background_cleanup_task = None # 初始化后台任务为None
+
+        if self.cleanup_interval_seconds > 0:
+            self._background_cleanup_task = asyncio.create_task(self._periodic_temp_dir_cleanup())
+            logger.info(f"GeminiArtist: 已启动定时清理任务，每隔 {self.cleanup_interval_seconds} 秒清理临时目录 {self.temp_dir} 中超过 {self.cleanup_older_than_seconds} 秒的文件。")
+        else:
+            logger.info("GeminiArtist: 定时清理功能已禁用 (temp_cleanup_interval_seconds <= 0)。")
+
+    def _blocking_cleanup_temp_dir_logic(self, older_than_seconds: int):
+        """实际执行清理的阻塞逻辑，方便被 to_thread 调用或直接在启动时调用。"""
+        if not os.path.isdir(self.temp_dir):
+            # logger.debug(f"临时目录 {self.temp_dir} 不存在。跳过清理逻辑。")
+            return 0, 0 # 返回清理的文件数和错误数
+
+        # logger.debug(f"执行临时目录清理逻辑: {self.temp_dir} (清理超过 {older_than_seconds} 秒的文件)")
+        now = time.time()
+        cleaned_count = 0
+        error_count = 0
+
+        try:
+            for filename in os.listdir(self.temp_dir):
+                file_path = os.path.join(self.temp_dir, filename)
+                try:
+                    if os.path.isfile(file_path) or os.path.islink(file_path):
+                        file_mod_time = os.path.getmtime(file_path)
+                        if (now - file_mod_time) > older_than_seconds:
+                            os.remove(file_path)
+                            # logger.debug(f"已移除旧的临时文件: {file_path}")
+                            cleaned_count += 1
+                except Exception as e_file:
+                    # logger.error(f"清理临时文件 {file_path} 时出错: {e_file}")
+                    error_count += 1
+        except Exception as e_list:
+            logger.error(f"列出目录 {self.temp_dir} 进行清理时出错: {e_list}")
+            error_count +=1 # 将列目录错误也计为一次错误
+        
+        if cleaned_count > 0 or error_count > 0:
+            logger.info(f"临时目录清理逻辑执行完毕: 在 {self.temp_dir} 中移除了 {cleaned_count} 个文件，发生 {error_count} 个错误。")
+        return cleaned_count, error_count
+
+    async def _periodic_temp_dir_cleanup(self):
+        """后台定时任务，定期清理临时目录。"""
+        while True:
+            await asyncio.sleep(self.cleanup_interval_seconds)
+            logger.info(f"定时清理任务触发，开始清理临时目录: {self.temp_dir}。")
+            try:
+                # 使用 asyncio.to_thread 在单独的线程中运行阻塞的I/O密集型清理逻辑
+                # functools.partial 用于预先绑定参数给 _blocking_cleanup_temp_dir_logic
+                cleanup_func = functools.partial(self._blocking_cleanup_temp_dir_logic, self.cleanup_older_than_seconds)
+                await asyncio.to_thread(cleanup_func)
+                # 对于 Python < 3.9, 可以考虑使用 loop.run_in_executor:
+                # loop = asyncio.get_event_loop()
+                # await loop.run_in_executor(None, cleanup_func) # None 表示使用默认的线程池执行器
+            except asyncio.CancelledError:
+                logger.info("定时清理任务已被取消。")
+                break # 任务被取消，退出循环
+            except Exception as e:
+                logger.error(f"定时清理任务执行过程中发生错误: {e}", exc_info=True)
+                # 即使发生错误，也应继续下一次调度，除非是 CancelledError
+
 
         
     def _check_packages(self) -> bool:
@@ -125,11 +191,11 @@ class GeminiArtist(Star):
              yield event.plain_result(f"您已经在当前会话有一个正在进行的绘制任务，请先完成或等待超时 ({int(self.waiting_users[session_key] - time.time())}秒后)。")
              return
 
-        self.waiting_users[session_key] = time.time() + 30
+        self.waiting_users[session_key] = time.time() + self.wait_time_from_config
         self.user_inputs[session_key] = {'messages': []}
         
         # logger.debug(f"Gemini_Draw: User {user_id} started draw. Message Type: {event.message_obj.type}, Session ID: {session_id}, Session Key: {session_key}. Waiting state set.")
-        yield event.plain_result(f"好的 {user_name}，请在30秒内发送文本描述和可能需要的图片, 然后发送包含'start'或'开始'的消息开始生成。")
+        yield event.plain_result(f"好的 {user_name}，请在{self.wait_time_from_config}秒内发送文本描述和可能需要的图片, 然后发送包含'start'或'开始'的消息开始生成。")
     
     @filter.event_message_type(EventMessageType.ALL)
     async def collect_user_inputs(self, event: AstrMessageEvent):
@@ -311,7 +377,7 @@ class GeminiArtist(Star):
                         if img_path and os.path.exists(img_path) and os.path.getsize(img_path) > 0: yield event.chain_result([Image.fromFileSystem(img_path)])
                         else: logger.error(f"collect_user_inputs: 降级发送时图片无效: {img_path}")
                     return 
-                # logger.info(f"BRANCH_NODES_MSG_UIN_OK: UIN={bot_id_for_node} (来自 {bot_uin_source}), Name='{bot_name_for_node}'.")
+                logger.info(f"BRANCH_NODES_MSG_UIN_OK: UIN={bot_id_for_node} (来自 {bot_uin_source}), Name='{bot_name_for_node}'.")
                 
                 ns = Nodes([])
                 if text_response:
@@ -485,15 +551,49 @@ class GeminiArtist(Star):
 
     async def terminate(self):
         '''插件被卸载/停用时调用，用于清理资源。'''
+        logger.info("GeminiArtist: 正在执行 terminate 清理操作...")
         self.waiting_users.clear()
         self.user_inputs.clear() 
-        # 清理临时文件
-        if hasattr(self, 'temp_dir') and os.path.exists(self.temp_dir):
-                if self.temp_dir == self.plugin_temp_base_dir: # 确保是插件自己的目录
-                    try:
-                        os.rmdir(self.temp_dir) # 仅当目录为空时才能成功
-                        logger.info(f"terminate: 已移除临时目录: {self.temp_dir}")
-                    except OSError as e_rmdir:
-                        logger.warning(f"terminate: 移除临时目录 {self.temp_dir} 失败 (可能不为空): {e_rmdir}")
+
+        # 取消后台清理任务
+        if self._background_cleanup_task and not self._background_cleanup_task.done():
+            logger.info("GeminiArtist: 正在取消后台定时清理任务...")
+            self._background_cleanup_task.cancel()
+            try:
+                await self._background_cleanup_task
+                logger.info("GeminiArtist: 后台定时清理任务已成功取消并结束。")
+            except asyncio.CancelledError:
+                logger.info("GeminiArtist: 后台定时清理任务捕获到 CancelledError，已正常终止。")
+            except Exception as e_task_cancel:
+                logger.error(f"GeminiArtist: 等待后台清理任务结束时发生异常: {e_task_cancel}", exc_info=True)
         else:
-            logger.info("terminate: 临时目录未找到或未定义，无需清理。")
+            logger.info("GeminiArtist: 无活动的后台清理任务需要取消，或任务已完成。")
+
+        # 清理临时文件 (这里可以保留，作为最后一道防线，或者如果希望terminate时也执行一次清理)
+        # 如果_periodic_temp_dir_cleanup能可靠运行，这里的清理可能不是必须的，除非希望立即清空
+        logger.info(f"GeminiArtist: 尝试在 terminate 中执行一次最终的临时文件清理 ({self.temp_dir})...")
+        try:
+            # 可以选择在这里也调用阻塞清理逻辑，或者依赖定时任务的最后一次执行
+            # 为了确保插件卸载时尽可能干净，可以再执行一次
+            # 注意：如果 _blocking_cleanup_temp_dir_logic 依赖 self 的其他状态，需确保此时状态有效
+            # 由于 _blocking_cleanup_temp_dir_logic 相对独立，这里直接调用通常是安全的
+            cleaned_count, error_count = self._blocking_cleanup_temp_dir_logic(0) # 清理所有文件，无论时间
+            logger.info(f"GeminiArtist: terminate 中的最终清理完成，移除了 {cleaned_count} 个文件，发生 {error_count} 个错误。")
+        except Exception as e_final_cleanup:
+            logger.error(f"GeminiArtist: terminate 中的最终清理失败: {e_final_cleanup}", exc_info=True)
+        
+        # 尝试移除插件自身的临时目录 (如果它是空的)
+        if hasattr(self, 'temp_dir') and os.path.exists(self.temp_dir):
+            if self.temp_dir == self.plugin_temp_base_dir: # 再次确认是插件自己的目录
+                try:
+                    # 仅当目录为空时 os.rmdir 才能成功
+                    if not os.listdir(self.temp_dir): # 检查目录是否为空
+                        os.rmdir(self.temp_dir)
+                        logger.info(f"terminate: 已成功移除空的临时目录: {self.temp_dir}")
+                    else:
+                        logger.info(f"terminate: 临时目录 {self.temp_dir} 非空，未移除。")
+                except OSError as e_rmdir:
+                    logger.warning(f"terminate: 移除临时目录 {self.temp_dir} 失败: {e_rmdir}")
+        else:
+            logger.info("terminate: 插件临时目录未找到或未定义，无需移除操作。")
+        logger.info("GeminiArtist: terminate 清理操作执行完毕。")
