@@ -8,8 +8,8 @@
 
 您可能会问，为什么不直接将 AstrBot 中的LLM提供商设置为 `gemini-2.0-flash-exp-image-generation` 等模型来进行图像生成，而是使用一个插件进行单独调用呢？主要因素：
 
-*   免费层级Gemini-API的`gemini-2.0-flash-flash-exp-image-generation等模型`每分钟请求数（RPM）、每日请求数（RPD）、每分钟令牌数（TPM）都很少，单独使用可以避免将限额消耗在非图像生成功能上，专注生图。
-*   gemini-2.0-flash-flash-exp-image-generation等模型`不支持系统调用词、不支持函数调用且上下文长度仅在32K左右的水平`，并不适合作为日常助手使用
+*   免费层级Gemini-API的`gemini-2.0-flash-exp-image-generation等模型`每分钟请求数（RPM）、每日请求数（RPD）、每分钟令牌数（TPM）都很少，单独使用可以避免将限额消耗在非图像生成功能上，专注生图。
+*   gemini-2.0-flash-exp-image-generation等模型`不支持系统调用词、不支持函数调用且上下文长度仅在32K左右的水平`，并不适合作为日常助手使用
 *   本插件实现了会话隔离，避免因多个用户同时使用或单个用户在不同会话中同时使用而导致的问题。
 *   本插件提供便捷的反代URL设置，方便您使用反向代理。
 *   本插件提供了更灵活的API Key、模型管理功能，支持顺序轮询和随机选择API Key和切换模型，避免因单个API Key的限制导致的生成失败或长期只使用一个API Key。
