@@ -1,0 +1,43 @@
+{
+    "api_key": {
+        "description": "Gemini API密钥",
+        "type": "list",
+        "hint": "请输入您的 Gemini API 密钥",
+        "default": []
+    },
+    "api_base_url": {
+        "description": "Gemini API基础URL",
+        "type": "string",
+        "hint": "可以填写你的反代地址,默认为官方API基础URL",
+        "default": "https://generativelanguage.googleapis.com"
+    },
+    "model": {
+        "description": "进行生图的模型,不在可选的可以到插件代码中进行修改",
+        "type": "string",
+        "hint": "选择要使用的生图模型",
+        "default": "gemini-2.0-flash-exp",
+        "options": [
+            "gemini-2.0-flash-exp",
+            "gemini-2.0-flash-exp-image-generation",
+            "gemini-2.0-flash-preview-image-generation"
+        ]
+    },
+    "robot_self_id": {
+        "type": "string",
+        "title": "机器人自身ID",
+        "description": "机器人平台的用户ID (例如QQ号)，用于识别机器人自身消息。",
+        "default": ""
+    },
+    "group_whitelist": {
+        "type": "list",
+        "title": "群聊白名单",
+        "description": "允许使用绘图功能的群聊ID或用户ID列表。如果为空，则不限制。",
+        "default": []
+    },
+    "random_api_key_selection": {
+        "type": "bool",
+        "title": "随机选择API Key",
+        "description": "启用后，将在可用的API Key中随机选择一个进行调用；禁用则按顺序轮询。",
+        "default": false
+    }
+}

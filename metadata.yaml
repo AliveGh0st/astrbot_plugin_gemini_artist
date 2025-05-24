@@ -1,0 +1,6 @@
+name: astrbot_plugin_gemini_artist
+desc: 使用 Google的 gemini-2.0-flash-exp`、gemini-2.0-flash-exp-image-generation、gemini-2.0-flash-preview-image-generation等模型进行图像生成
+help: 使用 /draw命令启动功能，然后按照提示输入内容即可生成图像
+version: v1.0.0
+author: nichinichisou0609
+repo: https://github.com/nichinichisou0609/astrbot_plugin_gemini_artist.git
