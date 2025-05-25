@@ -54,10 +54,7 @@ class GeminiArtist(Star):
         self.waiting_users = {}  # {(user_id, session_id): expiry_time}
         # 存储用户收集到的文本和图片，键为 (user_id, session_id)
         self.user_inputs = {} # {(user_id, session_id): {'messages': [{'text': '', 'images': [], 'timestamp': float}]}}
-        
-        if not self._check_packages():
-            self._install_packages()
-        
+    
         if not self.api_keys:
             logger.warning("Gemini API密钥未配置或配置为空。插件可能无法正常工作。")
 
@@ -123,27 +120,6 @@ class GeminiArtist(Star):
             except Exception as e:
                 logger.error(f"定时清理任务执行过程中发生错误: {e}", exc_info=True)
                 # 即使发生错误，也应继续下一次调度，除非是 CancelledError
-
-
-        
-    def _check_packages(self) -> bool:
-        """检查是否安装了需要的包"""
-        try:
-            importlib.import_module('google.genai')
-            importlib.import_module('PIL')
-            return True
-        except ImportError:
-            return False
-
-    def _install_packages(self):
-        """安装必要的包"""
-        try:
-            import subprocess
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "-U", "google-genai", "pillow"])
-            logger.info("成功安装必要的包: google-genai, pillow")
-        except subprocess.CalledProcessError as e:
-            logger.error(f"安装包失败: {str(e)}")
-            raise
         
     @filter.command("draw")
     async def initiate_creation_session(self, event: AstrMessageEvent):
