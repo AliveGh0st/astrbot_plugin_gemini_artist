@@ -4,8 +4,6 @@ from astrbot.api import logger
 from astrbot.api.all import *
 from astrbot.api.message_components import *
 import asyncio
-import sys
-import importlib
 from io import BytesIO
 import time
 import os
@@ -16,7 +14,7 @@ from PIL import Image as PILImage
 from google.genai.types import HttpOptions
 from astrbot.core.utils.io import download_image_by_url
 import re
-import functools # 用于 asyncio.to_thread 的辅助
+import functools
 
 
 @register("gemini_artist_plugin", "nichinichisou", "基于 Google Gemini 多模态模型的AI绘画插件", "1.1.0")
