@@ -1,6 +1,6 @@
 name: astrbot_plugin_gemini_artist
 desc: 使用 Google Gemini系列的生图模型进行独立上下文的图像生成
 help: 使用 /draw命令启动功能，然后按照提示输入内容即可生成图像
-version: v1.1.0
+version: v1.1.1
 author: nichinichisou
 repo: https://github.com/nichinichisou0609/astrbot_plugin_gemini_artist.git
