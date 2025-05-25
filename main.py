@@ -129,7 +129,7 @@ class GeminiArtist(Star):
     def _check_packages(self) -> bool:
         """检查是否安装了需要的包"""
         try:
-            importlib.import_module('google.generativeai')
+            importlib.import_module('google.genai')
             importlib.import_module('PIL')
             return True
         except ImportError:
@@ -139,8 +139,8 @@ class GeminiArtist(Star):
         """安装必要的包"""
         try:
             import subprocess
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "-U", "genai", "pillow"])
-            logger.info("成功安装必要的包: genai, pillow")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "-U", "google-genai", "pillow"])
+            logger.info("成功安装必要的包: google-genai, pillow")
         except subprocess.CalledProcessError as e:
             logger.error(f"安装包失败: {str(e)}")
             raise
