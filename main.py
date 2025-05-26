@@ -15,6 +15,8 @@ from google.genai.types import HttpOptions
 from astrbot.core.utils.io import download_image_by_url
 import re
 import functools
+from typing import List, Optional, Dict, Tuple
+from collections import deque
 
 
 @register("gemini_artist_plugin", "nichinichisou", "基于 Google Gemini 多模态模型的AI绘画插件", "1.1.0")
@@ -29,17 +31,16 @@ class GeminiArtist(Star):
         self.model_name_from_config = config.get("model_name", "gemini-2.0-flash-exp")
         self.group_whitelist = config.get("group_whitelist", [])
         self.random_api_key_selection = config.get("random_api_key_selection", False)
-        self.wait_time_from_config = config.get("wait_time", 30)
+        # self.wait_time_from_config = config.get("wait_time", 30) # LLM调用模式下可能不再需要
 
-        # logger.info(f"GeminiExpPlugin __init__: Loaded robot_self_id: '{self.robot_id_from_config}'")
-        # logger.info(f"GeminiExpPlugin __init__: Loaded group_whitelist: {self.group_whitelist}")
-        # logger.info(f"GeminiExpPlugin __init__: Loaded random_api_key_selection: {self.random_api_key_selection}")
+        # 新增：用户图片缓存，键为(user_id, session_id)，值为最近30张图片路径的双端队列
+        self.user_image_cache: Dict[Tuple[str, str], deque] = {}
+        self.max_cached_images = 30  # 每个用户最多缓存30张图片
 
         shared_data_path = "/AstrBot/data" 
         self.plugin_temp_base_dir = os.path.join(shared_data_path, "gemini_artist_temp")
         os.makedirs(self.plugin_temp_base_dir, exist_ok=True)
         self.temp_dir = self.plugin_temp_base_dir
-        # logger.critical(f"CRITICAL_INIT_LOG: self.temp_dir in __init__ is DEFINITIVELY SET TO: {self.temp_dir}")
         
         self.api_keys = [
             key.strip() 
@@ -48,11 +49,6 @@ class GeminiArtist(Star):
         ]
         self.current_api_key_index = 0
         
-        # 存储正在等待输入的用户，键为 (user_id, session_id)
-        self.waiting_users = {}  # {(user_id, session_id): expiry_time}
-        # 存储用户收集到的文本和图片，键为 (user_id, session_id)
-        self.user_inputs = {} # {(user_id, session_id): {'messages': [{'text': '', 'images': [], 'timestamp': float}]}}
-    
         if not self.api_keys:
             logger.warning("Gemini API密钥未配置或配置为空。插件可能无法正常工作。")
 
@@ -66,7 +62,6 @@ class GeminiArtist(Star):
             logger.info(f"GeminiArtist: 已启动定时清理任务，每隔 {self.cleanup_interval_seconds} 秒清理临时目录 {self.temp_dir} 中超过 {self.cleanup_older_than_seconds} 秒的文件。")
         else:
             logger.info("GeminiArtist: 定时清理功能已禁用 (temp_cleanup_interval_seconds <= 0)。")
-
     def _blocking_cleanup_temp_dir_logic(self, older_than_seconds: int):
         """实际执行清理的阻塞逻辑，方便被 to_thread 调用或直接在启动时调用。"""
         if not os.path.isdir(self.temp_dir):
@@ -94,10 +89,6 @@ class GeminiArtist(Star):
         except Exception as e_list:
             logger.error(f"列出目录 {self.temp_dir} 进行清理时出错: {e_list}")
             error_count +=1 # 将列目录错误也计为一次错误
-        
-        if cleaned_count > 0 or error_count > 0:
-            logger.info(f"临时目录清理逻辑执行完毕: 在 {self.temp_dir} 中移除了 {cleaned_count} 个文件，发生 {error_count} 个错误。")
-        return cleaned_count, error_count
 
     async def _periodic_temp_dir_cleanup(self):
         """后台定时任务，定期清理临时目录。"""
@@ -118,10 +109,96 @@ class GeminiArtist(Star):
             except Exception as e:
                 logger.error(f"定时清理任务执行过程中发生错误: {e}", exc_info=True)
                 # 即使发生错误，也应继续下一次调度，除非是 CancelledError
+
+
+    # 新增：存储用户图片路径的方法
+    def store_user_image(self, user_id: str, session_id: str, image_path: str) -> None:
+        """存储用户发送的图片路径到缓存中"""
+        key = (user_id, session_id)
+        if key not in self.user_image_cache:
+            self.user_image_cache[key] = deque(maxlen=self.max_cached_images)
         
-    @filter.command("draw")
-    async def initiate_creation_session(self, event: AstrMessageEvent):
-        """处理 /draw 命令，启动绘图会话。"""
+        self.user_image_cache[key].append(image_path)
+        logger.info(f"已存储用户 {user_id} 在会话 {session_id} 中的图片: {image_path}")
+
+    # 新增：获取用户最近的图片路径
+    def get_user_recent_image(self, user_id: str, session_id: str, index: int = 1) -> Optional[str]:
+        """获取用户最近发送的第index张图片路径
+        
+        Args:
+            user_id: 用户ID
+            session_id: 会话ID（私聊为用户ID，群聊为群ID）
+            index: 倒数第几张图片，默认为1（最新的图片）
+            
+        Returns:
+            图片路径，如果没有找到则返回None
+        """
+        key = (user_id, session_id)
+        if key not in self.user_image_cache or not self.user_image_cache[key]:
+            return None
+        
+        images = list(self.user_image_cache[key])
+        if index <= 0 or index > len(images):
+            return None
+        
+        # 返回倒数第index张图片
+        return images[-index]
+
+    # 新增：监听所有图片消息并存储
+    @filter.event_message_type(EventMessageType.ALL)
+    async def cache_user_images(self, event: AstrMessageEvent):
+        """监听所有消息，缓存用户发送的图片"""
+        if not hasattr(event, 'message_obj') or not hasattr(event.message_obj, 'type'):
+            return
+
+        user_id = event.get_sender_id()
+        
+        # 忽略机器人自身消息
+        if self.robot_id_from_config and user_id == self.robot_id_from_config:
+            return
+            
+        session_id = user_id  # 默认私聊时 session_id 就是 user_id
+        is_group_message = event.message_obj.type.name == 'GROUP_MESSAGE'
+
+        if is_group_message:
+            if hasattr(event.message_obj, 'group_id') and event.message_obj.group_id:
+                session_id = event.message_obj.group_id
+            else:
+                return
+        
+        # 白名单检查
+        if self.group_whitelist:
+            identifier_to_check = session_id if is_group_message else user_id
+            if str(identifier_to_check) not in [str(whitelisted_id) for whitelisted_id in self.group_whitelist]:
+                return
+
+        # 处理消息中的图片
+        message_chain = event.get_messages()
+        for msg in message_chain:
+            if isinstance(msg, Image):
+                try:
+                    if hasattr(msg, 'url') and msg.url:
+                        temp_img_path = await download_image_by_url(msg.url)
+                        # 验证图片有效性
+                        try:
+                            img = PILImage.open(temp_img_path)
+                            img.verify()  # 验证图片完整性
+                            # 存储有效图片路径
+                            self.store_user_image(user_id, session_id, temp_img_path)
+                        except Exception as img_err:
+                            logger.error(f"缓存图片验证失败: {temp_img_path}, 错误: {img_err}")
+                except Exception as e:
+                    logger.error(f"缓存用户图片失败: {str(e)}")
+
+    @filter.llm_tool(name="gemini_draw")
+    async def gemini_draw(self, event: AstrMessageEvent, prompt: str, image_index: int = 0) -> MessageEventResult:
+        '''
+        能够为用户生成图片的函数工具，你需要根据用户的要求（如图片要求、需要参考的图片）作为参数调用这个函数。你需要先回答你是否调用，再进行函数调用。
+
+        Args:
+            prompt (string): 用于生成图像的文本描述,此项为必填，此项为必填，此项为必填。
+            image_index (number): 要使用的参考图片索引，0表示不使用参考图片，1表示最新的图片，2表示倒数第二张，以此类推。
+        '''
         # 检查API密钥是否配置
         if not self.api_keys:
             yield event.plain_result("请联系管理员配置Gemini API密钥 (api_keys)")
@@ -134,9 +211,7 @@ class GeminiArtist(Star):
              return
 
         user_id = event.get_sender_id()
-        user_name = event.get_sender_name()
-        
-        session_id = user_id # 默认私聊时 session_id 就是 user_id
+        session_id = user_id  # 默认私聊时 session_id 就是 user_id
         is_group_message = event.message_obj.type.name == 'GROUP_MESSAGE'
 
         if is_group_message:
@@ -144,262 +219,163 @@ class GeminiArtist(Star):
                 session_id = event.message_obj.group_id
              else:
                  logger.error(f"gemini_draw: 群聊消息但未找到群组ID: {event.message_obj.raw_message}")
-                 yield event.plain_result("检测到群聊消息但未找到群组ID，无法启动绘制会话。")
+                 yield event.plain_result("检测到群聊消息但未找到群组ID，无法启动绘制。")
                  return
         
         # 白名单检查
-        if self.group_whitelist: # 仅当白名单列表有内容时才进行检查
-            # 对于群聊，检查 group_id 是否在白名单中
-            # 对于私聊，检查 user_id 是否在白名单中
+        if self.group_whitelist: 
             identifier_to_check = session_id if is_group_message else user_id
-            # 将白名单中的ID转换为字符串进行比较，以防配置中是数字
             if str(identifier_to_check) not in [str(whitelisted_id) for whitelisted_id in self.group_whitelist]:
                 logger.info(f"gemini_draw: 用户/群组 {identifier_to_check} 不在白名单中，已忽略。")
-                # 可以选择不回复，或者回复一个提示信息
-                # yield event.plain_result("抱歉，您没有权限使用此功能。") 
                 return
 
-        session_key = (user_id, session_id)
-
-        if session_key in self.waiting_users:
-             yield event.plain_result(f"您已经在当前会话有一个正在进行的绘制任务，请先完成或等待超时 ({int(self.waiting_users[session_key] - time.time())}秒后)。")
-             return
-
-        self.waiting_users[session_key] = time.time() + self.wait_time_from_config
-        self.user_inputs[session_key] = {'messages': []}
-        
-        # logger.debug(f"Gemini_Draw: User {user_id} started draw. Message Type: {event.message_obj.type}, Session ID: {session_id}, Session Key: {session_key}. Waiting state set.")
-        yield event.plain_result(f"好的 {user_name}，请在{self.wait_time_from_config}秒内发送文本描述和可能需要的图片, 然后发送包含'start'或'开始'的消息开始生成。")
-    
-    @filter.event_message_type(EventMessageType.ALL)
-    async def collect_user_inputs(self, event: AstrMessageEvent):
-        """处理后续消息，收集用户输入或触发生成。"""
-        if not hasattr(event, 'message_obj') or not hasattr(event.message_obj, 'type'):
-             # logger.error(f"collect_user_inputs: 事件对象缺少 message_obj 或 type 属性: {type(event)}")
-             return 
-
-        user_id = event.get_sender_id()
-        current_session_id = user_id 
-        is_group_message = event.message_obj.type.name == 'GROUP_MESSAGE'
-
-        if is_group_message:
-            if hasattr(event.message_obj, 'group_id') and event.message_obj.group_id:
-                 current_session_id = event.message_obj.group_id
-            # else:
-                 # logger.error(f"collect_user_inputs: 群聊消息但未找到群组ID: {event.message_obj.raw_message}")
-                 # pass # 即使没有 group_id，也继续使用 user_id 作为 session_id
-
-        # 白名单检查 (同样应用于后续消息，确保只有授权会话可以继续)
-        if self.group_whitelist:
-            identifier_to_check = current_session_id if is_group_message else user_id
-            if str(identifier_to_check) not in [str(whitelisted_id) for whitelisted_id in self.group_whitelist]:
-                # logger.info(f"collect_user_inputs: 用户/群组 {identifier_to_check} 不在白名单中，已忽略后续消息。")
-                return
-
-        current_session_key = (user_id, current_session_id)
-
-        if not isinstance(event, AstrMessageEvent):
-            logger.error(f"collect_user_inputs: 收到了错误类型的参数: {type(event)}")
-            return
-
-        # logger.debug(f"collect_user_inputs: Processing message. User ID: {user_id}, Message Type: {event.message_obj.type}, Session ID: {current_session_id}, Session Key: {current_session_key}")
-        # logger.debug(f"collect_user_inputs: Current waiting users keys: {list(self.waiting_users.keys())}")
-
+        # 忽略机器人自身消息
         if self.robot_id_from_config and user_id == self.robot_id_from_config:
-            # logger.debug(f"collect_user_inputs: 消息来自机器人自身 ({user_id})，已忽略。")
+            logger.debug(f"gemini_draw: 消息来自机器人自身 ({user_id})，已忽略。")
             return
 
-        message_text_raw = event.message_str.strip()
-        keywords = ["start", "开始"]
-        contains_keyword = any(keyword in event.message_str.lower() for keyword in keywords)
-        is_command = message_text_raw.startswith("/") or message_text_raw.lower().startswith("draw")
+        all_text = prompt.strip()
+        all_images_pil = []
 
-        if is_command and not contains_keyword:
-            # logger.debug(f"collect_user_inputs: 消息是命令 ({message_text_raw}) 且不包含 start/开始，已忽略。")
-            return
-
-        if current_session_key not in self.waiting_users:
-            # logger.debug(f"collect_user_inputs: Session key {current_session_key} not found in waiting users. Ignoring message.")
-            return
-
-        # logger.debug(f"collect_user_inputs: Session key {current_session_key} IS found in waiting users. Proceeding.")
-
-        if time.time() > self.waiting_users[current_session_key]:
-            # logger.debug(f"collect_user_inputs: Session {current_session_id} for user {user_id} timed out.")
-            del self.waiting_users[current_session_key]
-            if current_session_key in self.user_inputs:
-                del self.user_inputs[current_session_key]
-            yield event.plain_result("等待超时，请重新发送命令。")
-            return
-
-        message_chain = event.get_messages()
-        current_text = event.message_str
-        current_images = []
-
-        for msg in message_chain:
-            if isinstance(msg, Image):
+        # 处理参考图片
+        if image_index > 0:
+            reference_image_path = self.get_user_recent_image(user_id, session_id, image_index)
+            if reference_image_path:
                 try:
-                    if hasattr(msg, 'url') and msg.url:
-                        temp_img_path = await download_image_by_url(msg.url)
-                        img = PILImage.open(temp_img_path)
-                        img = img.convert("RGBA")
-                        current_images.append(img)
-                        # logger.info(f"Successfully downloaded image: {msg.url}")
+                    logger.info(f"gemini_draw: 使用参考图片: {reference_image_path}")
+                    img = PILImage.open(reference_image_path)
+                    img = img.convert("RGBA")  # 确保是RGBA格式
+                    all_images_pil.append(img)
                 except Exception as e:
-                    logger.error(f"collect_user_inputs: 处理图片失败: {str(e)}")
-                    yield event.plain_result(f"无法处理图片，请稍后再试或尝试其他图片。错误: {str(e)}")
+                    logger.error(f"gemini_draw: 处理参考图片失败: {str(e)}")
+                    yield event.plain_result(f"无法处理参考图片，请稍后再试。错误: {str(e)}")
                     return
+            else:
+                logger.warning(f"gemini_draw: 未找到索引为 {image_index} 的参考图片")
+                yield event.plain_result(f"未找到索引为 {image_index} 的参考图片，请确保您已发送图片或索引正确。")
+                return
+        
+        if not all_text and not all_images_pil:
+            yield event.plain_result("请提供文本描述或参考图片。")
+            return
 
-        if current_session_key not in self.user_inputs:
-             logger.error(f"collect_user_inputs: 用户 {user_id} 在会话 {current_session_id} 中等待，但 user_inputs 状态丢失。正在清理。")
-             if current_session_key in self.waiting_users:
-                 del self.waiting_users[current_session_key]
-             yield event.plain_result("您的等待状态异常，请重试。")
-             return
+        yield event.plain_result("正在处理您的绘图请求，请稍候...")
+            
+        try:
+            logger.debug("gemini_draw: 调用 gemini_generate...")
+            result = await self.gemini_generate(all_text, all_images_pil)
+            logger.debug(f"gemini_draw: gemini_generate 调用完成。")
 
-        message_data = {
-          'text': current_text,
-          'images': current_images,
-          'timestamp': time.time()
-         }
-        self.user_inputs[current_session_key]['messages'].append(message_data)
-
-        if contains_keyword:
-            # logger.debug(f"Gemini_Draw: Start keyword detected in session {current_session_id} for user {user_id}. Processing messages.")
-            collected_messages = sorted(self.user_inputs[current_session_key]['messages'], key=lambda x: x['timestamp'])
-            all_text = '\n'.join([msg['text'] for msg in collected_messages])
-            all_images = [img for msg in collected_messages for img in msg['images']]
-
-            for keyword in keywords:
-                 all_text = re.sub(r'\b' + re.escape(keyword) + r'\b', '', all_text, flags=re.IGNORECASE).strip()
-
-            del self.waiting_users[current_session_key]
-            del self.user_inputs[current_session_key]
-
-            if not all_text and not all_images:
-                yield event.plain_result("请提供文本描述或图片。")
+            if result is None:
+                logger.error("gemini_draw: gemini_generate 返回 None!")
+                yield event.plain_result("处理图片时发生严重内部错误（无法获取处理结果）。")
+                return
+            if not isinstance(result, dict):
+                logger.error(f"gemini_draw: gemini_generate 返回非字典类型: {type(result)}")
+                yield event.plain_result("处理图片时发生严重内部错误（结果格式错误）。")
                 return
 
-            yield event.plain_result("正在处理您的请求，请稍候...")
-            
-            try:
-                # logger.debug("collect_user_inputs: Calling gemini_generate...")
-                result = await self.gemini_generate(all_text, all_images)
-                # logger.debug(f"collect_user_inputs: gemini_generate call completed.")
+            text_response = result.get('text', '').strip()
+            image_paths = result.get('image_paths', []) 
+            logger.debug(f"gemini_generate 返回: 文本预览='{text_response[:100]}...', 图片数量={len(image_paths)}")
 
-                if result is None:
-                    logger.error("collect_user_inputs: gemini_generate 返回 None!")
-                    yield event.plain_result("处理图片时发生严重内部错误（无法获取处理结果）。")
-                    return
-                if not isinstance(result, dict):
-                    logger.error(f"collect_user_inputs: gemini_generate 返回非字典类型: {type(result)}")
-                    yield event.plain_result("处理图片时发生严重内部错误（结果格式错误）。")
-                    return
+            if not text_response and not image_paths:
+                logger.warning("gemini_draw: API未返回任何文本或图片内容。")
+                yield event.plain_result("未能从API获取任何文本或图片内容。")
+                return
 
-                text_response = result.get('text', '').strip()
-                image_paths = result.get('image_paths', []) 
-                # logger.debug(f"FUNC gemini_generate RETURNED: text_response_preview='{text_response[:100]}...', image_paths_count={len(image_paths)}, image_paths_list={image_paths}")
-
-                if not text_response and not image_paths:
-                    logger.warning("collect_user_inputs: API未返回任何文本或图片内容。")
-                    yield event.plain_result("未能从API获取任何文本或图片内容。")
-                    return
-
-                if len(image_paths) < 2:
-                    # logger.debug(f"BRANCH_SINGLE_MSG: 图片数量 ({len(image_paths)}) < 2，准备发送普通消息。")
-                    chain = []
-                    if text_response:
-                        chain.append(Plain(text_response))
-                    
-                    valid_image_count_for_chain = 0
-                    for idx, img_path in enumerate(image_paths):
-                        # logger.debug(f"BRANCH_SINGLE_MSG: 检查图片 {idx+1}: '{img_path}'")
-                        if img_path and os.path.exists(img_path) and os.path.getsize(img_path) > 0:
-                            chain.append(Image.fromFileSystem(img_path))
-                            valid_image_count_for_chain += 1
-                            # logger.debug(f"BRANCH_SINGLE_MSG: 图片 {img_path} 有效并已添加。")
-                        # else:
-                            # logger.error(f"BRANCH_SINGLE_MSG: 图片文件无效或不存在: path='{img_path}', exists={os.path.exists(img_path) if img_path else 'N/A'}, size={os.path.getsize(img_path) if img_path and os.path.exists(img_path) else 'N/A'}")
-                    
-                    if chain:
-                        # logger.info(f"BRANCH_SINGLE_MSG: 发送普通消息链 (有效图片数: {valid_image_count_for_chain}, 有文本: {bool(text_response)}). Chain: {[(type(c).__name__ + ':' + (c.text[:20] if hasattr(c,'text') else c.file if hasattr(c,'file') else 'UnknownComponent')) for c in chain]})
-                        yield event.chain_result(chain)
-                    else:
-                        # logger.warning("BRANCH_SINGLE_MSG: 构建普通消息链后内容为空。")
-                        yield event.plain_result("抱歉，未能生成有效内容或图片处理失败。")
-                    return 
-
-                # logger.info(f"BRANCH_NODES_MSG: 图片数量 ({len(image_paths)}) >= 2，准备构建合并转发消息。")
-                bot_id_for_node = None; bot_name_for_node = None; bot_uin_source = "未确定"
-                if hasattr(event, 'self_id') and event.self_id:
-                    try: bot_id_for_node = int(str(event.self_id).strip()); bot_uin_source = "event.self_id"
-                    except: logger.warning(f"event.self_id ('{event.self_id}') 转换失败"); bot_id_for_node = None
-                if bot_id_for_node is None and self.robot_id_from_config:
-                    try: bot_id_for_node = int(str(self.robot_id_from_config).strip()); bot_uin_source = "config.robot_self_id"
-                    except: logger.warning(f"config.robot_self_id ('{self.robot_id_from_config}') 转换失败"); bot_id_for_node = None
-                if bot_id_for_node is None:
-                    cfg_bot_id = str(self.config.get("bot_id", "")).strip()
-                    if cfg_bot_id:
-                        try: bot_id_for_node = int(cfg_bot_id); bot_uin_source = "config.bot_id"
-                        except: logger.warning(f"config.bot_id ('{cfg_bot_id}') 转换失败"); bot_id_for_node = None
-                bot_name_for_node = str(self.config.get("bot_name", "绘图助手")).strip() or "绘图助手"
-
-                if bot_id_for_node is None:
-                    logger.error("collect_user_inputs: 无法确定机器人UIN。降级处理。")
-                    if text_response: yield event.plain_result(text_response)
-                    for img_path in image_paths:
-                        if img_path and os.path.exists(img_path) and os.path.getsize(img_path) > 0: yield event.chain_result([Image.fromFileSystem(img_path)])
-                        else: logger.error(f"collect_user_inputs: 降级发送时图片无效: {img_path}")
-                    return 
-                logger.info(f"BRANCH_NODES_MSG_UIN_OK: UIN={bot_id_for_node} (来自 {bot_uin_source}), Name='{bot_name_for_node}'.")
-                
-                ns = Nodes([])
+            # 后续的图片发送逻辑 (BRANCH_SINGLE_MSG, BRANCH_NODES_MSG) 可以基本保持不变
+            # ... (此处省略了与 collect_user_inputs 中相同的消息发送逻辑) ...
+            # 您需要将 collect_user_inputs 方法中处理 result 并发送消息的部分复制到这里
+            # 例如：
+            if len(image_paths) < 2:
+                # logger.debug(f"BRANCH_SINGLE_MSG: 图片数量 ({len(image_paths)}) < 2，准备发送普通消息。")
+                chain = []
                 if text_response:
-                    try:
-                        text_node_content = [Plain(text_response)]
-                        ns.nodes.append(Node(uin=bot_id_for_node, name=bot_name_for_node, content=text_node_content))
-                        # logger.debug(f"BRANCH_NODES_MSG_TEXT_NODE_ADDED: 文本Node已添加。Nodes count: {len(ns.nodes)}. Content: {text_response[:50]}")
-                    except Exception as e_text_node:
-                        logger.error(f"collect_user_inputs: 创建文本Node失败: {e_text_node}", exc_info=True)
-
-                valid_image_node_count = 0
-                for i, img_path in enumerate(image_paths):
-                    # logger.debug(f"BRANCH_NODES_MSG_IMG_NODE_ATTEMPT: 尝试图片 {i+1}/{len(image_paths)}, path='{img_path}'")
-                    if img_path and os.path.exists(img_path) and os.path.getsize(img_path) > 0:
-                        try:
-                            img_node_chain = [Plain(f"图片 {i+1}/{len(image_paths)}"), Image.fromFileSystem(img_path)]
-                            ns.nodes.append(Node(uin=bot_id_for_node, name=bot_name_for_node, content=img_node_chain))
-                            valid_image_node_count += 1
-                            # logger.debug(f"BRANCH_NODES_MSG_IMG_NODE_ADDED: 图片Node {img_path} 已添加。Nodes count: {len(ns.nodes)}")
-                        except Exception as e_img_node:
-                            logger.error(f"collect_user_inputs: 创建图片Node {img_path} 失败: {e_img_node}", exc_info=True)
-                    # else:
-                        # logger.error(f"BRANCH_NODES_MSG_IMG_NODE_INVALID_PATH: 图片无效: path='{img_path}', exists={os.path.exists(img_path) if img_path else 'N/A'}, size={os.path.getsize(img_path) if img_path and os.path.exists(img_path) else 'N/A'}")
+                    chain.append(Plain(text_response))
                 
-                # logger.info(f"BRANCH_NODES_MSG_BUILD_COMPLETE: Nodes构建完成。总计Nodes: {len(ns.nodes)} (其中有效图片Nodes: {valid_image_node_count}).")
-
-                if ns.nodes:
-                    # logger.info(f"BRANCH_NODES_MSG_YIELDING: 准备发送 {len(ns.nodes)} 个Nodes。")
-                    yield event.chain_result([ns])
-                    # logger.info(f"BRANCH_NODES_MSG_YIELDED: {len(ns.nodes)} 个Nodes已yield。")
+                valid_image_count_for_chain = 0
+                for idx, img_path in enumerate(image_paths):
+                    # logger.debug(f"BRANCH_SINGLE_MSG: 检查图片 {idx+1}: '{img_path}'")
+                    if img_path and os.path.exists(img_path) and os.path.getsize(img_path) > 0:
+                        chain.append(Image.fromFileSystem(img_path))
+                        valid_image_count_for_chain += 1
+                        # logger.debug(f"BRANCH_SINGLE_MSG: 图片 {img_path} 有效并已添加。")
+                    # else:
+                        # logger.error(f"BRANCH_SINGLE_MSG: 图片文件无效或不存在: path='{img_path}', exists={os.path.exists(img_path) if img_path else 'N/A'}, size={os.path.getsize(img_path) if img_path and os.path.exists(img_path) else 'N/A'}")
+                
+                if chain:
+                    # logger.info(f"BRANCH_SINGLE_MSG: 发送普通消息链 (有效图片数: {valid_image_count_for_chain}, 有文本: {bool(text_response)}). Chain: {[(type(c).__name__ + ':' + (c.text[:20] if hasattr(c,'text') else c.file if hasattr(c,'file') else 'UnknownComponent')) for c in chain]})
+                    yield event.chain_result(chain)
                 else:
-                    logger.error("collect_user_inputs: ns.nodes列表为空，无法发送合并转发。")
-                    yield event.plain_result("抱歉，API未能生成可显示的有效内容。")
+                    # logger.warning("BRANCH_SINGLE_MSG: 构建普通消息链后内容为空。")
+                    yield event.plain_result("抱歉，未能生成有效内容或图片处理失败。")
                 return 
 
-            except Exception as e_main_handler:
-                logger.error(f"collect_user_inputs: 处理API响应或构建回复时发生顶层错误: {str(e_main_handler)}", exc_info=True)
-                yield event.plain_result(f"处理请求时发生严重内部错误，请联系管理员。")
-                return 
-        
-        else: 
-            if current_text.strip() or current_images: 
-                # logger.debug(f"CONTINUE_COLLECTING: 未检测到开始指令，收到输入: text='{current_text[:50]}...', images_count={len(current_images)}")
-                yield event.plain_result("已收到您的输入，请继续发送或发送包含'start'或'开始'的消息结束。")
-            # else:
-                # logger.debug("CONTINUE_COLLECTING: 收到空消息或仅含空格的消息，且不含开始指令，已忽略。")
+            # logger.info(f"BRANCH_NODES_MSG: 图片数量 ({len(image_paths)}) >= 2，准备构建合并转发消息。")
+            bot_id_for_node = None; bot_name_for_node = None; bot_uin_source = "未确定"
+            if hasattr(event, 'self_id') and event.self_id:
+                try: bot_id_for_node = int(str(event.self_id).strip()); bot_uin_source = "event.self_id"
+                except: logger.warning(f"event.self_id ('{event.self_id}') 转换失败"); bot_id_for_node = None
+            if bot_id_for_node is None and self.robot_id_from_config:
+                try: bot_id_for_node = int(str(self.robot_id_from_config).strip()); bot_uin_source = "config.robot_self_id"
+                except: logger.warning(f"config.robot_self_id ('{self.robot_id_from_config}') 转换失败"); bot_id_for_node = None
+            if bot_id_for_node is None:
+                cfg_bot_id = str(self.config.get("bot_id", "")).strip()
+                if cfg_bot_id:
+                    try: bot_id_for_node = int(cfg_bot_id); bot_uin_source = "config.bot_id"
+                    except: logger.warning(f"config.bot_id ('{cfg_bot_id}') 转换失败"); bot_id_for_node = None
+            bot_name_for_node = str(self.config.get("bot_name", "绘图助手")).strip() or "绘图助手"
 
-    async def gemini_generate(self, text, images):
+            if bot_id_for_node is None:
+                logger.error(f"BRANCH_NODES_MSG: 无法确定有效的 bot_id 用于构建 Node 消息 (尝试来源: {bot_uin_source})。将尝试发送普通消息。")
+                # 降级处理：如果无法获取bot_id，则尝试作为普通消息发送
+                chain = []
+                if text_response: chain.append(Plain(text_response))
+                for img_path in image_paths:
+                    if img_path and os.path.exists(img_path) and os.path.getsize(img_path) > 0:
+                        chain.append(Image.fromFileSystem(img_path))
+                if chain:
+                    yield event.chain_result(chain)
+                else:
+                    yield event.plain_result("抱歉，未能生成有效内容或图片处理失败（尝试降级发送也失败）。")
+                return
+
+            nodes = []
+            if text_response:
+                nodes.append(Node(user_id=bot_id_for_node, nickname=bot_name_for_node, message_chain=[Plain(text_response)]))
+            
+            valid_image_count_for_nodes = 0
+            for idx, img_path in enumerate(image_paths):
+                # logger.debug(f"BRANCH_NODES_MSG: 检查图片 {idx+1} for Node: '{img_path}'")
+                if img_path and os.path.exists(img_path) and os.path.getsize(img_path) > 0:
+                    nodes.append(Node(user_id=bot_id_for_node, nickname=bot_name_for_node, message_chain=[Image.fromFileSystem(img_path)]))
+                    valid_image_count_for_nodes += 1
+                    # logger.debug(f"BRANCH_NODES_MSG: 图片 {img_path} 有效并已为 Node 添加。")
+                # else:
+                    # logger.error(f"BRANCH_NODES_MSG: 图片文件无效或不存在 (for Node): path='{img_path}', exists={os.path.exists(img_path) if img_path else 'N/A'}, size={os.path.getsize(img_path) if img_path and os.path.exists(img_path) else 'N/A'}")
+
+            if nodes:
+                # logger.info(f"BRANCH_NODES_MSG: 发送合并转发消息 (有效图片数: {valid_image_count_for_nodes}, 有文本: {bool(text_response)}). Node count: {len(nodes)}")
+                yield event.node_custom_result(nodes)
+            else:
+                # logger.warning("BRANCH_NODES_MSG: 构建合并转发消息后内容为空。")
+                yield event.plain_result("抱歉，未能生成有效内容或图片处理失败（尝试构建合并消息也失败）。")
+
+        except types.StopCandidateException as e:
+            logger.warning(f"Gemini API 请求因安全设置被阻止 (StopCandidateException): {e}")
+            yield event.plain_result(f"请求内容可能违反了安全策略，已被阻止。{e}")
+        except types.BlockedPromptException as e:
+            logger.warning(f"Gemini API 请求因Prompt被阻止 (BlockedPromptException): {e}")
+            yield event.plain_result(f"您的提示词可能包含不当内容，已被阻止。 {e}")
+        except types.SafetyFeedbackError as e:
+            logger.warning(f"Gemini API 请求因安全反馈错误 (SafetyFeedbackError): {e}")
+            yield event.plain_result(f"请求因安全原因未能完成。{e}")
+        except Exception as e:
+            logger.error(f"gemini_draw: 调用 gemini_generate 或处理结果时发生未知错误: {e}", exc_info=True)
+            yield event.plain_result(f"处理您的请求时发生意外错误: {str(e)}")
+
+    async def gemini_generate(self, text_prompt: str, images_pil: list = None):
         """处理图片和文本，调用Gemini API，支持多密钥轮询和随机选择。"""
         # logger.critical(f"CRITICAL_PROCESS_LOG: self.temp_dir at start of gemini_generate: {self.temp_dir}")
         if not self.api_keys:
@@ -437,13 +413,13 @@ class GeminiArtist(Star):
                 )
 
                 contents = []
-                if text:
-                    contents.append(text)
-                for img in images:
+                if text_prompt:  # 修改 text 为 text_prompt
+                    contents.append(text_prompt)
+                for img in images_pil:  # 修改 images 为 images_pil
                     contents.append(img)
 
-                if len(contents) == 2 and text and len(images) == 1:
-                    contents = (text, images[0])
+                if len(contents) == 2 and text_prompt and len(images_pil) == 1:  # 修改 text 为 text_prompt，images 为 images_pil
+                    contents = (text_prompt, images_pil[0])
 
                 if not contents:
                     # logger.warning("gemini_generate: 没有有效的内容可以发送给Gemini API")
