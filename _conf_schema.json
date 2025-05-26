@@ -22,11 +22,11 @@
             "gemini-2.0-flash-preview-image-generation"
         ]
     },
-    "wait_time": {
-        "description": "等待时间",
+    "max_cached_images": {
+        "description": "缓存的图片url数量最大值",
         "type": "int",
-        "hint": "机器人等待回复的时间",
-        "default": 30
+        "hint": "仅在参照时下载，否则只缓存图片地址",
+        "default": 5
     },
     "robot_self_id": {
         "type": "string",
@@ -38,6 +38,7 @@
         "type": "list",
         "title": "群聊白名单",
         "description": "允许使用绘图功能的群聊ID或用户ID列表。如果为空，则不限制。",
+        "hint":"建议开启",
         "default": []
     },
     "random_api_key_selection": {

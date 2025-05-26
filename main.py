@@ -2,548 +2,537 @@ from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 from astrbot.api.all import *
-from astrbot.api.message_components import *
 import asyncio
 from io import BytesIO
 import time
 import os
 import random
 from google import genai
-from google.genai import types
 from PIL import Image as PILImage
 from google.genai.types import HttpOptions
-from astrbot.core.utils.io import download_image_by_url
-import re
+from astrbot.core.utils.io import download_file
 import functools
 from typing import List, Optional, Dict, Tuple
 from collections import deque
 
 
-@register("gemini_artist_plugin", "nichinichisou", "基于 Google Gemini 多模态模型的AI绘画插件", "1.1.0")
+@register("gemini_artist_plugin", "nichinichisou", "基于 Google Gemini 多模态模型的AI绘画插件", "1.2.0")
 class GeminiArtist(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
-        
+
         self.config = config
         api_key_list_from_config = config.get("api_key", [])
-        self.robot_id_from_config = config.get("robot_self_id", "")
         self.api_base_url_from_config = config.get("api_base_url", "https://generativelanguage.googleapis.com")
         self.model_name_from_config = config.get("model_name", "gemini-2.0-flash-exp")
         self.group_whitelist = config.get("group_whitelist", [])
+        self.robot_id_from_config = config.get("robot_self_id") 
         self.random_api_key_selection = config.get("random_api_key_selection", False)
-        # self.wait_time_from_config = config.get("wait_time", 30) # LLM调用模式下可能不再需要
 
-        # 新增：用户图片缓存，键为(user_id, session_id)，值为最近30张图片路径的双端队列
-        self.user_image_cache: Dict[Tuple[str, str], deque] = {}
-        self.max_cached_images = 30  # 每个用户最多缓存30张图片
+        # 存储用户发送的图片URL缓存
+        self.user_image_cache: Dict[Tuple[str, str], deque[Tuple[str, Optional[str]]]] = {}
+        self.max_cached_images = self.config.get("max_cached_images", 5)
 
-        shared_data_path = "/AstrBot/data" 
+        # 设置插件的临时文件目录
+        shared_data_path = "/AstrBot/data"
         self.plugin_temp_base_dir = os.path.join(shared_data_path, "gemini_artist_temp")
         os.makedirs(self.plugin_temp_base_dir, exist_ok=True)
         self.temp_dir = self.plugin_temp_base_dir
-        
+
         self.api_keys = [
-            key.strip() 
-            for key in api_key_list_from_config 
+            key.strip()
+            for key in api_key_list_from_config
             if isinstance(key, str) and key.strip()
         ]
         self.current_api_key_index = 0
-        
+
         if not self.api_keys:
             logger.warning("Gemini API密钥未配置或配置为空。插件可能无法正常工作。")
 
-        # 定时清理相关配置
-        self.cleanup_interval_seconds = self.config.get("temp_cleanup_interval_seconds", 3600 * 6) # 默认6小时
-        self.cleanup_older_than_seconds = self.config.get("temp_cleanup_files_older_than_seconds", 86400 * 3) # 默认清理3天前的文件
-        self._background_cleanup_task = None # 初始化后台任务为None
+        # 配置临时文件清理任务
+        self.cleanup_interval_seconds = self.config.get("temp_cleanup_interval_seconds", 3600 * 6)
+        self.cleanup_older_than_seconds = self.config.get("temp_cleanup_files_older_than_seconds", 86400 * 3)
+        self._background_cleanup_task = None
 
+        # 启动后台定时清理任务
         if self.cleanup_interval_seconds > 0:
             self._background_cleanup_task = asyncio.create_task(self._periodic_temp_dir_cleanup())
             logger.info(f"GeminiArtist: 已启动定时清理任务，每隔 {self.cleanup_interval_seconds} 秒清理临时目录 {self.temp_dir} 中超过 {self.cleanup_older_than_seconds} 秒的文件。")
         else:
             logger.info("GeminiArtist: 定时清理功能已禁用 (temp_cleanup_interval_seconds <= 0)。")
-    def _blocking_cleanup_temp_dir_logic(self, older_than_seconds: int):
-        """实际执行清理的阻塞逻辑，方便被 to_thread 调用或直接在启动时调用。"""
+
+    def _blocking_cleanup_temp_dir_logic(self, older_than_seconds: int) -> Tuple[int, int]:
+        """
+        同步执行临时目录清理的逻辑，移除旧文件。
+        """
         if not os.path.isdir(self.temp_dir):
-            # logger.debug(f"临时目录 {self.temp_dir} 不存在。跳过清理逻辑。")
-            return 0, 0 # 返回清理的文件数和错误数
-
-        # logger.debug(f"执行临时目录清理逻辑: {self.temp_dir} (清理超过 {older_than_seconds} 秒的文件)")
-        now = time.time()
-        cleaned_count = 0
-        error_count = 0
-
+            return 0, 0
+        now, cleaned_count, error_count = time.time(), 0, 0
         try:
             for filename in os.listdir(self.temp_dir):
                 file_path = os.path.join(self.temp_dir, filename)
                 try:
                     if os.path.isfile(file_path) or os.path.islink(file_path):
-                        file_mod_time = os.path.getmtime(file_path)
-                        if (now - file_mod_time) > older_than_seconds:
+                        if (now - os.path.getmtime(file_path)) > older_than_seconds:
                             os.remove(file_path)
-                            # logger.debug(f"已移除旧的临时文件: {file_path}")
                             cleaned_count += 1
                 except Exception as e_file:
-                    # logger.error(f"清理临时文件 {file_path} 时出错: {e_file}")
+                    logger.error(f"清理临时文件 {file_path} 时出错: {e_file}")
                     error_count += 1
         except Exception as e_list:
             logger.error(f"列出目录 {self.temp_dir} 进行清理时出错: {e_list}")
-            error_count +=1 # 将列目录错误也计为一次错误
+            error_count += 1
+        if cleaned_count > 0 or error_count > 0:
+            logger.info(f"临时目录清理: 移除 {cleaned_count} 文件, 发生 {error_count} 错误 @ {self.temp_dir}")
+        return cleaned_count, error_count
 
     async def _periodic_temp_dir_cleanup(self):
-        """后台定时任务，定期清理临时目录。"""
+        """
+        周期性地清理临时目录的后台任务。
+        """
         while True:
             await asyncio.sleep(self.cleanup_interval_seconds)
-            logger.info(f"定时清理任务触发，开始清理临时目录: {self.temp_dir}。")
+            logger.info(f"定时清理触发: {self.temp_dir}")
             try:
-                # 使用 asyncio.to_thread 在单独的线程中运行阻塞的I/O密集型清理逻辑
-                # functools.partial 用于预先绑定参数给 _blocking_cleanup_temp_dir_logic
                 cleanup_func = functools.partial(self._blocking_cleanup_temp_dir_logic, self.cleanup_older_than_seconds)
                 await asyncio.to_thread(cleanup_func)
-                # 对于 Python < 3.9, 可以考虑使用 loop.run_in_executor:
-                # loop = asyncio.get_event_loop()
-                # await loop.run_in_executor(None, cleanup_func) # None 表示使用默认的线程池执行器
             except asyncio.CancelledError:
-                logger.info("定时清理任务已被取消。")
-                break # 任务被取消，退出循环
+                logger.info("定时清理任务已取消。")
+                break
             except Exception as e:
-                logger.error(f"定时清理任务执行过程中发生错误: {e}", exc_info=True)
-                # 即使发生错误，也应继续下一次调度，除非是 CancelledError
+                logger.error(f"定时清理任务出错: {e}", exc_info=True)
 
-
-    # 新增：存储用户图片路径的方法
-    def store_user_image(self, user_id: str, session_id: str, image_path: str) -> None:
-        """存储用户发送的图片路径到缓存中"""
+    def store_user_image(self, user_id: str, session_id: str, image_url: str, original_filename: Optional[str] = None) -> None:
+        """
+        将用户发送的图片URL存储到缓存中。
+        """
         key = (user_id, session_id)
         if key not in self.user_image_cache:
             self.user_image_cache[key] = deque(maxlen=self.max_cached_images)
-        
-        self.user_image_cache[key].append(image_path)
-        logger.info(f"已存储用户 {user_id} 在会话 {session_id} 中的图片: {image_path}")
+        self.user_image_cache[key].append((image_url, original_filename))
+        logger.info(f"已存储用户 {user_id} session {session_id} 图片URL: {image_url} (缓存 {len(self.user_image_cache[key])}/{self.max_cached_images})")
 
-    # 新增：获取用户最近的图片路径
-    def get_user_recent_image(self, user_id: str, session_id: str, index: int = 1) -> Optional[str]:
-        """获取用户最近发送的第index张图片路径
-        
-        Args:
-            user_id: 用户ID
-            session_id: 会话ID（私聊为用户ID，群聊为群ID）
-            index: 倒数第几张图片，默认为1（最新的图片）
-            
-        Returns:
-            图片路径，如果没有找到则返回None
+    async def download_pil_image_from_url(self, image_url: str, context_description: str = "图片") -> Optional[PILImage.Image]:
+        """
+        从给定的URL下载图片并返回PIL Image对象。
+        """
+        logger.info(f"尝试使用 astrbot.core.utils.io.download_file 下载 {context_description} URL: {image_url}")
+
+        # 尝试从URL中获取文件扩展名
+        ext = ".png"
+        try:
+            path_part = image_url.split('?')[0].split('#')[0]
+            base_name = os.path.basename(path_part)
+            _, url_ext = os.path.splitext(base_name)
+            if url_ext and url_ext.startswith('.') and len(url_ext) <= 5:
+                ext = url_ext.lower()
+            elif image_url.lower().endswith(('.jpg', '.jpeg', '.png', '.webp', '.gif')):
+                for known_ext in ['.jpg', '.jpeg', '.png', '.webp', '.gif']:
+                    if image_url.lower().endswith(known_ext):
+                        ext = known_ext
+                        break
+        except Exception as e_ext:
+            logger.debug(f"从URL {image_url} 获取扩展名时出错: {e_ext}，使用默认扩展名 {ext}")
+
+        filename = f"gemini_artist_temp_{time.time()}_{random.randint(1000,9999)}{ext}"
+        target_file_path = os.path.join(self.temp_dir, filename)
+
+        os.makedirs(self.temp_dir, exist_ok=True)
+
+        try:
+            await download_file(url=image_url, path=target_file_path, show_progress=False)
+
+            if os.path.exists(target_file_path) and os.path.isfile(target_file_path) and os.path.getsize(target_file_path) > 0:
+                img_pil = PILImage.open(target_file_path)
+                img_pil.load()
+
+                logger.info(f"成功使用 download_file 下载并加载 {context_description} 从 {image_url} (本地文件: {target_file_path})")
+                return img_pil
+            else:
+                logger.error(f"download_file 声称完成，但在路径 '{target_file_path}' 未找到有效文件或文件为空。URL: {image_url}")
+                if os.path.exists(target_file_path):
+                    try:
+                        os.remove(target_file_path)
+                    except Exception:
+                        pass
+                return None
+
+        except FileNotFoundError:
+            logger.error(f"尝试写入下载文件时发生 FileNotFoundError，请检查临时目录 '{self.temp_dir}' 是否有效且可写。 URL: {image_url}", exc_info=True)
+            return None
+        except PILImage.UnidentifiedImageError:
+            logger.error(f"Pillow无法识别下载的图片文件 {target_file_path}。可能不是有效的图片格式或文件已损坏。 URL: {image_url}", exc_info=True)
+            if os.path.exists(target_file_path):
+                try:
+                    os.remove(target_file_path)
+                except Exception as e_rem:
+                    logger.warning(f"清理无效下载文件 {target_file_path} 失败: {e_rem}")
+            return None
+        except Exception as e:
+            logger.error(f"调用 download_file(url='{image_url}', path='{target_file_path}') 时发生错误: {type(e).__name__} - {e}", exc_info=True)
+            if os.path.exists(target_file_path) and os.path.getsize(target_file_path) == 0:
+                try:
+                    os.remove(target_file_path)
+                except Exception:
+                    pass
+            return None
+
+    async def get_user_recent_image_pil_from_cache(self, user_id: str, session_id: str, index: int = 1) -> Optional[PILImage.Image]:
+        """
+        从用户图片缓存中获取指定索引的图片并下载为PIL Image对象。
         """
         key = (user_id, session_id)
         if key not in self.user_image_cache or not self.user_image_cache[key]:
+            logger.debug(f"缓存中未找到用户 {user_id} session {session_id} 的图片URL。")
             return None
-        
-        images = list(self.user_image_cache[key])
-        if index <= 0 or index > len(images):
+        cached_items = list(self.user_image_cache[key])
+        if not (0 < index <= len(cached_items)):
+            logger.debug(f"请求的图片URL索引 {index} 超出用户 {user_id} session {session_id} 缓存范围 ({len(cached_items)} 条)。")
             return None
-        
-        # 返回倒数第index张图片
-        return images[-index]
+        image_url, _ = cached_items[-index]
+        return await self.download_pil_image_from_url(image_url, f"用户 {user_id} 缓存的第 {index} 张图片")
 
-    # 新增：监听所有图片消息并存储
     @filter.event_message_type(EventMessageType.ALL)
     async def cache_user_images(self, event: AstrMessageEvent):
-        """监听所有消息，缓存用户发送的图片"""
+        """
+        监听所有消息，将用户发送的图片URL缓存起来。
+        """
         if not hasattr(event, 'message_obj') or not hasattr(event.message_obj, 'type'):
             return
-
         user_id = event.get_sender_id()
-        
-        # 忽略机器人自身消息
         if self.robot_id_from_config and user_id == self.robot_id_from_config:
             return
-            
-        session_id = user_id  # 默认私聊时 session_id 就是 user_id
-        is_group_message = event.message_obj.type.name == 'GROUP_MESSAGE'
-
-        if is_group_message:
-            if hasattr(event.message_obj, 'group_id') and event.message_obj.group_id:
-                session_id = event.message_obj.group_id
-            else:
-                return
-        
-        # 白名单检查
+        session_id = event.message_obj.session_id
         if self.group_whitelist:
-            identifier_to_check = session_id if is_group_message else user_id
+            identifier_to_check = event.message_obj.group_id if event.message_obj.group_id else user_id
             if str(identifier_to_check) not in [str(whitelisted_id) for whitelisted_id in self.group_whitelist]:
                 return
 
-        # 处理消息中的图片
-        message_chain = event.get_messages()
-        for msg in message_chain:
-            if isinstance(msg, Image):
-                try:
-                    if hasattr(msg, 'url') and msg.url:
-                        temp_img_path = await download_image_by_url(msg.url)
-                        # 验证图片有效性
-                        try:
-                            img = PILImage.open(temp_img_path)
-                            img.verify()  # 验证图片完整性
-                            # 存储有效图片路径
-                            self.store_user_image(user_id, session_id, temp_img_path)
-                        except Exception as img_err:
-                            logger.error(f"缓存图片验证失败: {temp_img_path}, 错误: {img_err}")
-                except Exception as e:
-                    logger.error(f"缓存用户图片失败: {str(e)}")
+        for msg_component in event.get_messages():
+            if isinstance(msg_component, Image) and hasattr(msg_component, 'url') and msg_component.url:
+                self.store_user_image(user_id, session_id, msg_component.url, getattr(msg_component, 'file', None))
 
     @filter.llm_tool(name="gemini_draw")
-    async def gemini_draw(self, event: AstrMessageEvent, prompt: str, image_index: int = 0) -> MessageEventResult:
+    async def gemini_draw(self, event: AstrMessageEvent, prompt: str, image_index: int = 0, reference_user_id: Optional[str] = None) -> MessageEventResult:
         '''
-        能够为用户生成图片的函数工具，你需要根据用户的要求（如图片要求、需要参考的图片）作为参数调用这个函数。你需要先回答你是否调用，再进行函数调用。
-
+        图像生成工具，调用关键词“生成” “图像处理” “画”等。
         Args:
-            prompt (string): 用于生成图像的文本描述,此项为必填，此项为必填，此项为必填。
-            image_index (number): 要使用的参考图片索引，0表示不使用参考图片，1表示最新的图片，2表示倒数第二张，以此类推。
+            prompt (string): 图像的文本描述。需要包含“生成”、“图片”等关键词。
+            image_index (number, optional): 要使用的来自用户历史记录的参考图片索引。默认为0 (不使用)。
+                                            1表示最新的图片，2表示倒数第二张，以此类推。
+                                            此索引应用于 'reference_user_id' 指定的用户，或引用消息的发送者，或命令的发送者。
+            reference_user_id (string, optional): 需要参考其图片历史记录的用户ID。默认为None。
+                                                如果LLM解析到用户@某人，应传入此ID。
         '''
-        # 检查API密钥是否配置
         if not self.api_keys:
-            yield event.plain_result("请联系管理员配置Gemini API密钥 (api_keys)")
+            yield event.plain_result("请联系管理员配置Gemini API密钥。")
+            return
+        if not hasattr(event, 'message_obj') or not hasattr(event.message_obj, 'type'):
+            logger.error(f"gemini_draw: 事件对象缺少 message_obj 或 type 属性。")
+            yield event.plain_result("处理消息时出错。")
             return
 
-        # 确保message_obj存在且有type属性
-        if not hasattr(event, 'message_obj') or not hasattr(event.message_obj, 'type'):
-             logger.error(f"gemini_draw: 事件对象缺少 message_obj 或 type 属性: {type(event)}")
-             yield event.plain_result("处理消息类型时出错，请联系管理员。")
-             return
+        command_sender_id = event.get_sender_id()
+        session_id = event.message_obj.session_id
 
-        user_id = event.get_sender_id()
-        session_id = user_id  # 默认私聊时 session_id 就是 user_id
-        is_group_message = event.message_obj.type.name == 'GROUP_MESSAGE'
-
-        if is_group_message:
-             if hasattr(event.message_obj, 'group_id') and event.message_obj.group_id:
-                session_id = event.message_obj.group_id
-             else:
-                 logger.error(f"gemini_draw: 群聊消息但未找到群组ID: {event.message_obj.raw_message}")
-                 yield event.plain_result("检测到群聊消息但未找到群组ID，无法启动绘制。")
-                 return
-        
-        # 白名单检查
-        if self.group_whitelist: 
-            identifier_to_check = session_id if is_group_message else user_id
-            if str(identifier_to_check) not in [str(whitelisted_id) for whitelisted_id in self.group_whitelist]:
-                logger.info(f"gemini_draw: 用户/群组 {identifier_to_check} 不在白名单中，已忽略。")
-                return
-
-        # 忽略机器人自身消息
-        if self.robot_id_from_config and user_id == self.robot_id_from_config:
-            logger.debug(f"gemini_draw: 消息来自机器人自身 ({user_id})，已忽略。")
+        if self.group_whitelist and str(event.message_obj.group_id or command_sender_id) not in map(str, self.group_whitelist):
+            return
+        if self.robot_id_from_config and command_sender_id == self.robot_id_from_config:
             return
 
         all_text = prompt.strip()
-        all_images_pil = []
+        all_images_pil: List[PILImage.Image] = []
 
-        # 处理参考图片
-        if image_index > 0:
-            reference_image_path = self.get_user_recent_image(user_id, session_id, image_index)
-            if reference_image_path:
-                try:
-                    logger.info(f"gemini_draw: 使用参考图片: {reference_image_path}")
-                    img = PILImage.open(reference_image_path)
-                    img = img.convert("RGBA")  # 确保是RGBA格式
-                    all_images_pil.append(img)
-                except Exception as e:
-                    logger.error(f"gemini_draw: 处理参考图片失败: {str(e)}")
-                    yield event.plain_result(f"无法处理参考图片，请稍后再试。错误: {str(e)}")
-                    return
+        # 优先处理回复消息中的图片
+        replied_image_pil: Optional[PILImage.Image] = None
+        message_chain = event.get_messages()
+
+        for msg_component in message_chain:
+            if isinstance(msg_component, Reply):
+                logger.debug(f"检测到回复消息。尝试解析被引用的图片。Reply component dir: {dir(msg_component)}")
+                if hasattr(msg_component, '__dict__'):
+                    logger.debug(f"Reply component vars: {vars(msg_component)}")
+
+                source_chain: Optional[List[MessageComponent]] = None
+                # 尝试从回复消息中获取图片链
+                if hasattr(msg_component, 'chain') and isinstance(msg_component.chain, list):
+                    source_chain = msg_component.chain
+                    logger.debug("Reply component has 'chain' attribute.")
+                elif hasattr(msg_component, 'message') and isinstance(msg_component.message, list):
+                    source_chain = msg_component.message
+                    logger.debug("Reply component has 'message' attribute (list).")
+                elif hasattr(msg_component, 'source') and hasattr(msg_component.source, 'message_chain') and isinstance(msg_component.source.message_chain, list):
+                    source_chain = msg_component.source.message_chain
+                    logger.debug("Reply component has 'source.message_chain' attribute.")
+
+                if source_chain:
+                    for replied_part in source_chain:
+                        if isinstance(replied_part, Image) and hasattr(replied_part, 'url') and replied_part.url:
+                            replied_image_pil = await self.download_pil_image_from_url(replied_part.url, "直接引用的消息中的图片")
+                            if replied_image_pil:
+                                logger.info("成功从直接引用的消息中加载了图片作为参考。")
+                                all_images_pil.append(replied_image_pil)
+                            break
+                if replied_image_pil:
+                    logger.info("使用直接引用的图片作为唯一参考，忽略 image_index 和 reference_user_id。")
+                    image_index = 0
+                    reference_user_id = None
+                break
+
+        # 如果没有直接引用的图片，且指定了图片索引，则尝试从缓存中获取
+        if not all_images_pil and image_index > 0:
+            user_id_for_cache_lookup = command_sender_id
+            if reference_user_id:
+                user_id_for_cache_lookup = reference_user_id
+                logger.info(f"gemini_draw: LLM指定参考用户 {reference_user_id} 的第 {image_index} 张缓存图片。")
+            elif any(isinstance(mc, Reply) for mc in message_chain):
+                for mc_temp in message_chain:
+                    if isinstance(mc_temp, Reply):
+                        replied_msg_sender_id_for_cache = None
+                        if hasattr(mc_temp, 'user_id') and mc_temp.user_id:
+                            replied_msg_sender_id_for_cache = str(mc_temp.user_id)
+                        elif hasattr(mc_temp, 'sender_id') and mc_temp.sender_id:
+                            replied_msg_sender_id_for_cache = str(mc_temp.sender_id)
+                        elif hasattr(mc_temp, 'qq') and mc_temp.qq:
+                            replied_msg_sender_id_for_cache = str(mc_temp.qq)
+                        elif hasattr(mc_temp, 'sender') and hasattr(mc_temp.sender, 'id') and mc_temp.sender.id:
+                            replied_msg_sender_id_for_cache = str(mc_temp.sender.id)
+
+                        if replied_msg_sender_id_for_cache:
+                            user_id_for_cache_lookup = replied_msg_sender_id_for_cache
+                            logger.info(f"gemini_draw: 引用了消息，但未直接找到图片。尝试使用被引用者 {user_id_for_cache_lookup} 的第 {image_index} 张缓存图片。")
+                        break
+
+            logger.info(f"gemini_draw: 尝试从用户 {user_id_for_cache_lookup} (会话 {session_id}) 缓存获取并下载索引为 {image_index} 的图片。")
+            pil_image_from_cache = await self.get_user_recent_image_pil_from_cache(user_id_for_cache_lookup, session_id, image_index)
+            if pil_image_from_cache:
+                all_images_pil.append(pil_image_from_cache)
             else:
-                logger.warning(f"gemini_draw: 未找到索引为 {image_index} 的参考图片")
-                yield event.plain_result(f"未找到索引为 {image_index} 的参考图片，请确保您已发送图片或索引正确。")
+                message = f"未找到或无法下载用户 {user_id_for_cache_lookup} 的第 {image_index} 张参考图片。"
+                if user_id_for_cache_lookup != command_sender_id:
+                    message += f" (尝试了从指定/引用用户处获取)"
+                logger.warning(f"gemini_draw: {message}")
+                yield event.plain_result(message + " 请确保该用户已发送图片、图片URL有效或索引正确。")
                 return
-        
+
         if not all_text and not all_images_pil:
-            yield event.plain_result("请提供文本描述或参考图片。")
+            yield event.plain_result("请提供文本描述，或通过回复图片/指定图片索引及可选的参考用户来提供有效的参考图片。")
             return
 
-        yield event.plain_result("正在处理您的绘图请求，请稍候...")
-            
+        yield event.plain_result("正在生成图片，请稍候...")
+
         try:
-            logger.debug("gemini_draw: 调用 gemini_generate...")
+            logger.debug(f"gemini_draw: 调用 gemini_generate (文本: '{all_text[:50]}...', PIL图片数: {len(all_images_pil)})")
             result = await self.gemini_generate(all_text, all_images_pil)
             logger.debug(f"gemini_draw: gemini_generate 调用完成。")
 
-            if result is None:
-                logger.error("gemini_draw: gemini_generate 返回 None!")
-                yield event.plain_result("处理图片时发生严重内部错误（无法获取处理结果）。")
-                return
-            if not isinstance(result, dict):
-                logger.error(f"gemini_draw: gemini_generate 返回非字典类型: {type(result)}")
-                yield event.plain_result("处理图片时发生严重内部错误（结果格式错误）。")
+            if result is None or not isinstance(result, dict):
+                logger.error(f"gemini_draw: gemini_generate 返回无效结果: {type(result)}")
+                yield event.plain_result("处理图片时发生内部错误。")
                 return
 
             text_response = result.get('text', '').strip()
-            image_paths = result.get('image_paths', []) 
-            logger.debug(f"gemini_generate 返回: 文本预览='{text_response[:100]}...', 图片数量={len(image_paths)}")
+            image_paths = result.get('image_paths', [])
+            logger.debug(f"gemini_generate 返回: 文本预览='{text_response[:100]}...', 生成图片数={len(image_paths)}")
 
             if not text_response and not image_paths:
-                logger.warning("gemini_draw: API未返回任何文本或图片内容。")
-                yield event.plain_result("未能从API获取任何文本或图片内容。")
+                logger.warning("gemini_draw: API未返回任何文本或生成的图片内容。")
+                yield event.plain_result("未能从API获取任何内容。")
                 return
 
-            # 后续的图片发送逻辑 (BRANCH_SINGLE_MSG, BRANCH_NODES_MSG) 可以基本保持不变
-            # ... (此处省略了与 collect_user_inputs 中相同的消息发送逻辑) ...
-            # 您需要将 collect_user_inputs 方法中处理 result 并发送消息的部分复制到这里
-            # 例如：
+            # 如果只有一张图片或没有图片，则直接发送
             if len(image_paths) < 2:
-                # logger.debug(f"BRANCH_SINGLE_MSG: 图片数量 ({len(image_paths)}) < 2，准备发送普通消息。")
                 chain = []
                 if text_response:
                     chain.append(Plain(text_response))
-                
-                valid_image_count_for_chain = 0
-                for idx, img_path in enumerate(image_paths):
-                    # logger.debug(f"BRANCH_SINGLE_MSG: 检查图片 {idx+1}: '{img_path}'")
-                    if img_path and os.path.exists(img_path) and os.path.getsize(img_path) > 0:
-                        chain.append(Image.fromFileSystem(img_path))
-                        valid_image_count_for_chain += 1
-                        # logger.debug(f"BRANCH_SINGLE_MSG: 图片 {img_path} 有效并已添加。")
-                    # else:
-                        # logger.error(f"BRANCH_SINGLE_MSG: 图片文件无效或不存在: path='{img_path}', exists={os.path.exists(img_path) if img_path else 'N/A'}, size={os.path.getsize(img_path) if img_path and os.path.exists(img_path) else 'N/A'}")
-                
-                if chain:
-                    # logger.info(f"BRANCH_SINGLE_MSG: 发送普通消息链 (有效图片数: {valid_image_count_for_chain}, 有文本: {bool(text_response)}). Chain: {[(type(c).__name__ + ':' + (c.text[:20] if hasattr(c,'text') else c.file if hasattr(c,'file') else 'UnknownComponent')) for c in chain]})
-                    yield event.chain_result(chain)
-                else:
-                    # logger.warning("BRANCH_SINGLE_MSG: 构建普通消息链后内容为空。")
-                    yield event.plain_result("抱歉，未能生成有效内容或图片处理失败。")
-                return 
-
-            # logger.info(f"BRANCH_NODES_MSG: 图片数量 ({len(image_paths)}) >= 2，准备构建合并转发消息。")
-            bot_id_for_node = None; bot_name_for_node = None; bot_uin_source = "未确定"
-            if hasattr(event, 'self_id') and event.self_id:
-                try: bot_id_for_node = int(str(event.self_id).strip()); bot_uin_source = "event.self_id"
-                except: logger.warning(f"event.self_id ('{event.self_id}') 转换失败"); bot_id_for_node = None
-            if bot_id_for_node is None and self.robot_id_from_config:
-                try: bot_id_for_node = int(str(self.robot_id_from_config).strip()); bot_uin_source = "config.robot_self_id"
-                except: logger.warning(f"config.robot_self_id ('{self.robot_id_from_config}') 转换失败"); bot_id_for_node = None
-            if bot_id_for_node is None:
-                cfg_bot_id = str(self.config.get("bot_id", "")).strip()
-                if cfg_bot_id:
-                    try: bot_id_for_node = int(cfg_bot_id); bot_uin_source = "config.bot_id"
-                    except: logger.warning(f"config.bot_id ('{cfg_bot_id}') 转换失败"); bot_id_for_node = None
-            bot_name_for_node = str(self.config.get("bot_name", "绘图助手")).strip() or "绘图助手"
-
-            if bot_id_for_node is None:
-                logger.error(f"BRANCH_NODES_MSG: 无法确定有效的 bot_id 用于构建 Node 消息 (尝试来源: {bot_uin_source})。将尝试发送普通消息。")
-                # 降级处理：如果无法获取bot_id，则尝试作为普通消息发送
-                chain = []
-                if text_response: chain.append(Plain(text_response))
                 for img_path in image_paths:
                     if img_path and os.path.exists(img_path) and os.path.getsize(img_path) > 0:
                         chain.append(Image.fromFileSystem(img_path))
                 if chain:
                     yield event.chain_result(chain)
                 else:
-                    yield event.plain_result("抱歉，未能生成有效内容或图片处理失败（尝试降级发送也失败）。")
+                    if text_response:
+                        yield event.plain_result(text_response)
+                    else:
+                        yield event.plain_result("抱歉，未能生成有效内容。")
                 return
 
+            # 如果有多张图片，尝试以合并转发消息的形式发送
+            bot_id_for_node_str = event.message_obj.self_id or self.robot_id_from_config or self.config.get("bot_id")
+            bot_id_for_node = int(str(bot_id_for_node_str).strip()) if bot_id_for_node_str and str(bot_id_for_node_str).strip().isdigit() else None
+            if bot_id_for_node is None:
+                logger.error(f"gemini_draw: 无法确定有效的 bot_id。尝试普通发送。")
+                chain = []
+                if text_response:
+                    chain.append(Plain(text_response))
+                for img_path in image_paths:
+                    if img_path and os.path.exists(img_path) and os.path.getsize(img_path) > 0:
+                        chain.append(Image.fromFileSystem(img_path))
+                if chain:
+                    yield event.chain_result(chain)
+                else:
+                    yield event.plain_result("抱歉，未能生成有效内容。")
+                return
+
+            bot_name_for_node = str(self.config.get("bot_name", "绘图助手")).strip() or "绘图助手"
             nodes = []
             if text_response:
                 nodes.append(Node(user_id=bot_id_for_node, nickname=bot_name_for_node, message_chain=[Plain(text_response)]))
-            
-            valid_image_count_for_nodes = 0
-            for idx, img_path in enumerate(image_paths):
-                # logger.debug(f"BRANCH_NODES_MSG: 检查图片 {idx+1} for Node: '{img_path}'")
+            for img_path in image_paths:
                 if img_path and os.path.exists(img_path) and os.path.getsize(img_path) > 0:
                     nodes.append(Node(user_id=bot_id_for_node, nickname=bot_name_for_node, message_chain=[Image.fromFileSystem(img_path)]))
-                    valid_image_count_for_nodes += 1
-                    # logger.debug(f"BRANCH_NODES_MSG: 图片 {img_path} 有效并已为 Node 添加。")
-                # else:
-                    # logger.error(f"BRANCH_NODES_MSG: 图片文件无效或不存在 (for Node): path='{img_path}', exists={os.path.exists(img_path) if img_path else 'N/A'}, size={os.path.getsize(img_path) if img_path and os.path.exists(img_path) else 'N/A'}")
-
             if nodes:
-                # logger.info(f"BRANCH_NODES_MSG: 发送合并转发消息 (有效图片数: {valid_image_count_for_nodes}, 有文本: {bool(text_response)}). Node count: {len(nodes)}")
                 yield event.node_custom_result(nodes)
             else:
-                # logger.warning("BRANCH_NODES_MSG: 构建合并转发消息后内容为空。")
-                yield event.plain_result("抱歉，未能生成有效内容或图片处理失败（尝试构建合并消息也失败）。")
+                yield event.plain_result("抱歉，未能生成有效内容。")
 
-        except types.StopCandidateException as e:
-            logger.warning(f"Gemini API 请求因安全设置被阻止 (StopCandidateException): {e}")
-            yield event.plain_result(f"请求内容可能违反了安全策略，已被阻止。{e}")
-        except types.BlockedPromptException as e:
-            logger.warning(f"Gemini API 请求因Prompt被阻止 (BlockedPromptException): {e}")
-            yield event.plain_result(f"您的提示词可能包含不当内容，已被阻止。 {e}")
-        except types.SafetyFeedbackError as e:
-            logger.warning(f"Gemini API 请求因安全反馈错误 (SafetyFeedbackError): {e}")
-            yield event.plain_result(f"请求因安全原因未能完成。{e}")
+        except (genai.types.StopCandidateException, genai.types.BlockedPromptException, genai.types.SafetyFeedbackError) as google_safety_err:
+            logger.warning(f"Gemini API 安全相关错误: {google_safety_err}")
+            yield event.plain_result(f"请求因安全策略被阻止。详情: {google_safety_err}")
+        except genai.APIError as google_api_err:
+            logger.error(f"Gemini API 调用失败: {google_api_err}", exc_info=True)
+            yield event.plain_result(f"Gemini API 调用出错: {str(google_api_err)}")
         except Exception as e:
-            logger.error(f"gemini_draw: 调用 gemini_generate 或处理结果时发生未知错误: {e}", exc_info=True)
-            yield event.plain_result(f"处理您的请求时发生意外错误: {str(e)}")
+            logger.error(f"gemini_draw 未知错误: {e}", exc_info=True)
+            yield event.plain_result(f"处理请求时发生意外错误: {str(e)}")
 
-    async def gemini_generate(self, text_prompt: str, images_pil: list = None):
-        """处理图片和文本，调用Gemini API，支持多密钥轮询和随机选择。"""
-        # logger.critical(f"CRITICAL_PROCESS_LOG: self.temp_dir at start of gemini_generate: {self.temp_dir}")
+    async def gemini_generate(self, text_prompt: str, images_pil: List[PILImage.Image] = None):
+        """
+        调用Gemini API生成文本和图片。
+        支持多API密钥轮询和随机选择。
+        """
         if not self.api_keys:
-            # 此处应返回一个可由调用者处理的错误，或者直接 yield 错误消息
-            # 但由于此函数被 collect_user_inputs 调用，后者会处理 yield
-            # 因此这里可以直接 raise，由上层捕获或传递
-            # logger.error("gemini_generate: 没有配置API密钥 (api_keys)")
-            # return {'text': "错误：没有配置API密钥。", 'image_paths': []} # 或者返回错误信息
             raise ValueError("没有配置API密钥 (api_keys)")
-
-        http_options = HttpOptions(
-            base_url=self.api_base_url_from_config
-        )
-
-        max_retries = len(self.api_keys)
-        last_exception = None
-        
-        # API Key 选择逻辑
+        images_pil = images_pil or []
+        http_options = HttpOptions(base_url=self.api_base_url_from_config)
+        max_retries, last_exception = len(self.api_keys), None
         key_indices_to_try = list(range(len(self.api_keys)))
         if self.random_api_key_selection:
-            random.shuffle(key_indices_to_try) # 随机打乱索引顺序
-            # logger.info(f"gemini_generate: 启用随机API Key选择，尝试顺序: {key_indices_to_try}")
+            random.shuffle(key_indices_to_try)
         else:
-            # 按顺序轮询，从 current_api_key_index 开始
             key_indices_to_try = [(self.current_api_key_index + i) % len(self.api_keys) for i in range(len(self.api_keys))]
-            # logger.info(f"gemini_generate: 禁用随机API Key选择，按顺序尝试，起始索引: {self.current_api_key_index}, 尝试顺序: {key_indices_to_try}")
 
         for attempt_num, key_idx_to_use in enumerate(key_indices_to_try):
             current_key_to_try = self.api_keys[key_idx_to_use]
             try:
-                logger.info(f"gemini_generate: 尝试使用API密钥{key_idx_to_use+1} (尝试次数: {attempt_num + 1}/{max_retries})")
-                client = genai.Client(
-                    api_key=current_key_to_try,
-                    http_options=http_options
-                )
-
+                logger.info(f"gemini_generate: 尝试API密钥索引 {key_idx_to_use} (尝试 {attempt_num + 1}/{max_retries})")
+                client = genai.Client(api_key=current_key_to_try, http_options=http_options)
                 contents = []
-                if text_prompt:  # 修改 text 为 text_prompt
-                    contents.append(text_prompt)
-                for img in images_pil:  # 修改 images 为 images_pil
-                    contents.append(img)
-
-                if len(contents) == 2 and text_prompt and len(images_pil) == 1:  # 修改 text 为 text_prompt，images 为 images_pil
-                    contents = (text_prompt, images_pil[0])
-
+                if text_prompt:
+                    contents.append(text_prompt+",请使用中文回复")
+                for img_item in images_pil:
+                    contents.append(img_item)
                 if not contents:
-                    # logger.warning("gemini_generate: 没有有效的内容可以发送给Gemini API")
-                    # return {'text': "错误：没有提供任何内容。", 'image_paths': []}
-                    raise ValueError("没有有效的内容可以发送给Gemini API")
+                    raise ValueError("没有有效的内容发送给Gemini API")
 
                 response = await asyncio.to_thread(
                     client.models.generate_content,
-                    model="models/"+self.model_name_from_config,
+                    model="models/" + self.model_name_from_config,
                     contents=contents,
-                    config=types.GenerateContentConfig(response_modalities=['Text', 'Image'])
+                    config=genai.types.GenerateContentConfig(response_modalities=['Text', 'Image'])
                 )
-
-                # logger.info(f"gemini_generate: Gemini API响应 (使用密钥索引 {key_idx_to_use}): {response}")
-
                 result = {'text': '', 'image_paths': []}
+                if not response:
+                    logger.warning("gemini_generate: API响应为空。")
+                    raise ValueError("Gemini API返回空响应。")
 
-                if not response or not hasattr(response, 'candidates') or not response.candidates:
-                    block_reason_msg = "未知原因"
-                    if hasattr(response, 'prompt_feedback') and response.prompt_feedback.block_reason:
-                         block_reason_msg = f"{response.prompt_feedback.block_reason_message or response.prompt_feedback.block_reason}"
-                    # logger.warning(f"gemini_generate: Gemini API请求被阻止或返回空候选: {block_reason_msg}")
-                    raise ValueError(f"Gemini API请求被阻止: {block_reason_msg}")
+                if hasattr(response, 'prompt_feedback') and getattr(response.prompt_feedback, 'block_reason', None):
+                    msg = f"Prompt被阻止: {response.prompt_feedback.block_reason}"
+                    if hasattr(response.prompt_feedback, 'block_reason_message'):
+                        msg += f" - {response.prompt_feedback.block_reason_message}"
+                    logger.warning(f"gemini_generate: {msg}")
+                    raise genai.types.BlockedPromptException(msg)
 
-                if not hasattr(response.candidates[0], 'content') or not response.candidates[0].content:
-                     # logger.warning("gemini_generate: Gemini API返回的content为空")
-                     raise ValueError("Gemini API返回的content为空")
+                if not hasattr(response, 'candidates') or not response.candidates:
+                    logger.warning("gemini_generate: API响应中无候选。")
+                    raise ValueError("Gemini API响应中无有效候选。")
 
-                if not hasattr(response.candidates[0].content, 'parts') or not response.candidates[0].content.parts:
-                    # logger.warning("gemini_generate: Gemini API返回的parts为空")
-                    raise ValueError("Gemini API返回的parts为空")
+                candidate = response.candidates[0]
+                if hasattr(candidate, 'finish_reason') and candidate.finish_reason.name == 'SAFETY':
+                    s_info = f" 安全评级: {candidate.safety_ratings}" if hasattr(candidate, 'safety_ratings') else ""
+                    msg = f"内容因安全策略被阻止 (finish_reason: SAFETY).{s_info}"
+                    logger.warning(f"gemini_generate: {msg}")
+                    raise genai.types.SafetyFeedbackError(msg)
 
-                for part in response.candidates[0].content.parts:
+                if not (hasattr(candidate, 'content') and candidate.content and hasattr(candidate.content, 'parts') and candidate.content.parts):
+                    f_info = f"(finish_reason: {candidate.finish_reason.name})" if hasattr(candidate, 'finish_reason') else ""
+                    logger.warning(f"gemini_generate: Candidate content/parts为空 {f_info}.")
+                    raise ValueError(f"Gemini API返回候选内容或部分为空 {f_info}.")
+
+                for part in candidate.content.parts:
                     if hasattr(part, 'text') and part.text is not None:
                         result['text'] += part.text
-                    elif hasattr(part, 'inline_data') and part.inline_data is not None:
+                    elif hasattr(part, 'inline_data') and part.inline_data and hasattr(part.inline_data, 'mime_type') and part.inline_data.mime_type.startswith('image/'):
                         img_data = part.inline_data.data
-                        img = PILImage.open(BytesIO(img_data))
-                        img = img.convert("RGBA")
+                        gen_img = PILImage.open(BytesIO(img_data))
+                        ext = part.inline_data.mime_type.split('/')[-1]
+                        if ext not in ['png', 'jpeg', 'jpg', 'webp', 'gif']:
+                            ext = 'png'
+                        os.makedirs(self.temp_dir, exist_ok=True)
+                        temp_fp = os.path.join(self.temp_dir, f"gemini_gen_{time.time()}_{random.randint(100,999)}.{ext}")
+                        gen_img.save(temp_fp)
+                        result['image_paths'].append(temp_fp)
+                        logger.info(f"Gemini API 生成并保存图片: {temp_fp} (MIME: {part.inline_data.mime_type})")
 
-                        # 确保临时目录存在 (理论上 __init__ 已创建，但再次检查无害)
-                        os.makedirs(self.temp_dir, exist_ok=True) 
-                        temp_file_path = os.path.join(self.temp_dir, f"gemini_result_{time.time()}_{key_idx_to_use}.png")
-                        img.save(temp_file_path, format="PNG")
-                        result['image_paths'].append(temp_file_path)
-                
-                # logger.debug(f"gemini_generate_RESULT_PRE_RETURN: Attempt {attempt_num + 1}, KeyIndex {key_idx_to_use}")
-                # logger.debug(f"  Result Text Preview: '{result.get('text', '')[:100]}...'" )
-                # logger.debug(f"  Result Image Paths Count: {len(result.get('image_paths', []))}")
-                # logger.debug(f"  Result Image Paths List: {result.get('image_paths', [])}")
-                # for idx, path in enumerate(result.get('image_paths', [])):
-                    # logger.debug(f"    Image Path {idx}: '{path}', Exists: {os.path.exists(path) if path else False}, Size: {os.path.getsize(path) if path and os.path.exists(path) else 'N/A'}")
-                
-                # 如果成功，更新 current_api_key_index 以便下次轮询从下一个开始 (仅在非随机模式下)
+                if not result['text'] and not result['image_paths']:
+                    logger.warning(f"Gemini API返回空文本和图片. Candidate: {candidate}")
                 if not self.random_api_key_selection:
                     self.current_api_key_index = (key_idx_to_use + 1) % len(self.api_keys)
                 return result
 
+            except (genai.types.StopCandidateException, genai.types.BlockedPromptException, genai.types.SafetyFeedbackError) as google_safety_err:
+                logger.warning(f"gemini_generate: API安全错误 (密钥 {key_idx_to_use}): {google_safety_err}")
+                last_exception = google_safety_err
+            except genai.APIError as google_api_err:
+                logger.error(f"gemini_generate: Google APIError (密钥 {key_idx_to_use}): {google_api_err}", exc_info=True)
+                last_exception = google_api_err
             except Exception as e:
-                logger.error(f"gemini_generate: API处理失败 (使用密钥索引 {key_idx_to_use}): {str(e)}")
+                logger.error(f"gemini_generate: API处理失败 (密钥 {key_idx_to_use}): {str(e)}", exc_info=True)
                 last_exception = e
-                # 在非随机模式下，如果当前密钥失败，则传统的 current_api_key_index 递增逻辑仍然适用，
-                # 但由于我们是按 key_indices_to_try 列表尝试，所以不需要在这里更新 self.current_api_key_index
-                # self.current_api_key_index = (self.current_api_key_index + 1) % len(self.api_keys)
-                if attempt_num < max_retries - 1:
-                    logger.info(f"gemini_generate: 将尝试下一个API密钥 (下一个尝试索引: {key_indices_to_try[attempt_num+1]})")
-                else:
-                    logger.error("gemini_generate: 所有API密钥均尝试失败。")
 
+            if attempt_num < max_retries - 1:
+                logger.info(f"gemini_generate: 尝试下个API密钥 (下个索引: {key_indices_to_try[attempt_num+1]})")
+            else:
+                logger.error("gemini_generate: 所有API密钥均尝试失败。")
         if last_exception:
-            # logger.error(f"gemini_generate_ALL_ATTEMPTS_FAILED: 所有API密钥尝试均失败。最后错误: {last_exception}")
-            raise last_exception # 将最后遇到的异常向上抛出
-        else:
-            # 理论上不应该执行到这里，因为如果所有尝试都失败，last_exception 应该有值
-            # 但作为保险，如果意外到达这里，也抛出错误
-            logger.error("gemini_generate: 未知原因导致未能成功从API获取数据且无异常记录。")
-            raise ValueError("Gemini API处理失败，且没有可用的API密钥或未记录明确错误。")
-
+            raise last_exception
+        logger.error("gemini_generate: 未能从API获取数据且无明确异常。")
+        raise ValueError("Gemini API处理失败，无可用密钥或未记录错误。")
 
     async def terminate(self):
-        '''插件被卸载/停用时调用，用于清理资源。'''
-        logger.info("GeminiArtist: 正在执行 terminate 清理操作...")
-        self.waiting_users.clear()
-        self.user_inputs.clear() 
-
-        # 取消后台清理任务
+        """
+        插件终止时执行清理操作，包括清空图片缓存和取消后台清理任务。
+        """
+        logger.info("GeminiArtist: 执行 terminate 清理...")
+        if hasattr(self, 'user_image_cache'):
+            self.user_image_cache.clear()
+            logger.info("用户图片URL缓存已清空。")
         if self._background_cleanup_task and not self._background_cleanup_task.done():
-            logger.info("GeminiArtist: 正在取消后台定时清理任务...")
+            logger.info("取消后台定时清理任务...")
             self._background_cleanup_task.cancel()
             try:
                 await self._background_cleanup_task
-                logger.info("GeminiArtist: 后台定时清理任务已成功取消并结束。")
             except asyncio.CancelledError:
-                logger.info("GeminiArtist: 后台定时清理任务捕获到 CancelledError，已正常终止。")
-            except Exception as e_task_cancel:
-                logger.error(f"GeminiArtist: 等待后台清理任务结束时发生异常: {e_task_cancel}", exc_info=True)
+                logger.info("后台清理任务已取消。")
+            except Exception as e:
+                logger.error(f"等待后台清理任务结束时异常: {e}", exc_info=True)
         else:
-            logger.info("GeminiArtist: 无活动的后台清理任务需要取消，或任务已完成。")
-
-        # 清理临时文件 (这里可以保留，作为最后一道防线，或者如果希望terminate时也执行一次清理)
-        # 如果_periodic_temp_dir_cleanup能可靠运行，这里的清理可能不是必须的，除非希望立即清空
-        logger.info(f"GeminiArtist: 尝试在 terminate 中执行一次最终的临时文件清理 ({self.temp_dir})...")
+            logger.info("无活动后台清理任务或已完成。")
+        logger.info(f"最终临时文件清理 ({self.temp_dir})...")
         try:
-            # 可以选择在这里也调用阻塞清理逻辑，或者依赖定时任务的最后一次执行
-            # 为了确保插件卸载时尽可能干净，可以再执行一次
-            # 注意：如果 _blocking_cleanup_temp_dir_logic 依赖 self 的其他状态，需确保此时状态有效
-            # 由于 _blocking_cleanup_temp_dir_logic 相对独立，这里直接调用通常是安全的
-            cleaned_count, error_count = self._blocking_cleanup_temp_dir_logic(0) # 清理所有文件，无论时间
-            logger.info(f"GeminiArtist: terminate 中的最终清理完成，移除了 {cleaned_count} 个文件，发生 {error_count} 个错误。")
-        except Exception as e_final_cleanup:
-            logger.error(f"GeminiArtist: terminate 中的最终清理失败: {e_final_cleanup}", exc_info=True)
-        
-        # 尝试移除插件自身的临时目录 (如果它是空的)
-        if hasattr(self, 'temp_dir') and os.path.exists(self.temp_dir):
-            if self.temp_dir == self.plugin_temp_base_dir: # 再次确认是插件自己的目录
-                try:
-                    # 仅当目录为空时 os.rmdir 才能成功
-                    if not os.listdir(self.temp_dir): # 检查目录是否为空
-                        os.rmdir(self.temp_dir)
-                        logger.info(f"terminate: 已成功移除空的临时目录: {self.temp_dir}")
-                    else:
-                        logger.info(f"terminate: 临时目录 {self.temp_dir} 非空，未移除。")
-                except OSError as e_rmdir:
-                    logger.warning(f"terminate: 移除临时目录 {self.temp_dir} 失败: {e_rmdir}")
+            await asyncio.to_thread(self._blocking_cleanup_temp_dir_logic, 0)
+        except Exception as e:
+            logger.error(f"最终清理失败: {e}", exc_info=True)
+        # 仅当临时目录是插件特有的且为空时才尝试移除
+        if hasattr(self, 'temp_dir') and os.path.exists(self.temp_dir) and self.temp_dir == self.plugin_temp_base_dir:
+            try:
+                if not os.listdir(self.temp_dir):
+                    os.rmdir(self.temp_dir)
+                    logger.info(f"已移除空临时目录: {self.temp_dir}")
+                else:
+                    logger.info(f"临时目录 {self.temp_dir} 非空，未移除。")
+            except OSError as e:
+                logger.warning(f"移除临时目录 {self.temp_dir} 失败: {e}")
         else:
-            logger.info("terminate: 插件临时目录未找到或未定义，无需移除操作。")
-        logger.info("GeminiArtist: terminate 清理操作执行完毕。")
+            logger.info("插件临时目录未找到/定义/非预期，无需移除。")
+        logger.info("GeminiArtist: terminate 清理完毕。")
