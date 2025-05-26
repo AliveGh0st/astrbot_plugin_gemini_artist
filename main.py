@@ -145,6 +145,10 @@ class GeminiArtist(Star):
             if os.path.exists(target_file_path) and os.path.isfile(target_file_path) and os.path.getsize(target_file_path) > 0:
                 img_pil = PILImage.open(target_file_path)
                 img_pil.load()
+                if img_pil.mode != 'RGBA':
+                    img_pil = img_pil.convert('RGBA')
+                logger.debug(f"图片从 {img_pil.mode} 转换为 RGBA 模式: {target_file_path}")
+
 
                 logger.info(f"成功使用 download_file 下载并加载 {context_description} 从 {image_url} (本地文件: {target_file_path})")
                 return img_pil
