@@ -1,6 +1,6 @@
 name: astrbot_plugin_gemini_artist
-desc: 使用 Google Gemini系列的生图模型进行独立上下文的图像生成
+desc: 提供调用Gemini系列的生图模型的函数工具
 help: 一个调用Gemini系列的生图模型的函数工具
-version: v1.2.0
+version: v1.3.0
 author: nichinichisou
 repo: https://github.com/nichinichisou0609/astrbot_plugin_gemini_artist.git
