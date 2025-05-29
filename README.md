@@ -1,20 +1,16 @@
 # Gemini Artist 插件 - 便捷的Gemini生图模型控制助手,用于Astrbot平台
 
-本插件能够让您便捷使用 Google的 `gemini-2.0-flash-exp` 、`gemini-2.0-flash-exp-image-generation`、`gemini-2.0-flash-preview-image-generation`模型进行图像生成(本人已知的Gemini免费api能够使用的三种生图模型，性能区别未知)。
+本插件能够让您便捷使用 Google的 `gemini-2.0-flash-exp` 、`gemini-2.0-flash-exp-image-generation`、`gemini-2.0-flash-preview-image-generation`等模型进行图像生成(本人已知的Gemini免费api能够使用的三种生图模型，性能区别未知)。
 
 >注意：本插件仅在aicoqhttp协议下的QQ平台进行过测试，其他协议平台可用性未知，欢迎反馈。
 
-## 🤔 为何选择本插件？
+## 🚀 使用方法
 
-您可能会问，为什么不直接将 AstrBot 中的LLM提供商设置为 `gemini-2.0-flash-exp-image-generation` 等模型来进行图像生成，而是使用一个插件进行单独调用呢？主要因素：
+*   启用插件，并与能够使用函数工具的平台大模型对话，要求其生成/画/图像处理等即可实现自动调用，可通过对话或引用指定参考图片，支持多张图片参考
 
-*   免费层级Gemini-API的`gemini-2.0-flash-exp-image-generation等模型`每分钟请求数（RPM）、每日请求数（RPD）、每分钟令牌数（TPM）都很少，单独使用可以避免将限额消耗在非图像生成功能上，专注生图。
-*   gemini-2.0-flash-exp-image-generation等模型`不支持系统调用词、不支持函数调用且上下文长度仅在32K左右的水平`，并不适合作为日常助手使用
-*   ~~本插件实现了会话隔离，避免因多个用户同时使用或单个用户在不同会话中同时使用而导致的问题。~~
-*   本插件提供便捷的反代URL设置，方便您使用反向代理。
-*   本插件提供了更灵活的API Key、模型管理功能，支持顺序轮询和随机选择API Key和切换模型，避免因单个API Key的限制导致的生成失败或长期只使用一个API Key。
-*   支持常见的带有透明度的 "P" 模式QQ表情包。
-*   本插件将功能注册为平台大模型函数工具（新）
+## 🎨 使用示例
+
+ ![alt text](img/img1.jpg) ![alt text](img/img3.jpg) ![alt text](img/img2.jpg)
 
 
 ## 🔑 配置指南
@@ -32,13 +28,19 @@
     *   `temp_cleanup_files_older_than_seconds`: (可选) 清理时，将清理临时目录中存放超过此时间（秒）的文件。默认为 `259200` (3天)。
 3.  **网络代理** (如果需要)：如果您无法直接访问 Google API (`https://generativelanguage.googleapis.com`)，请确保您的Astrbot配置了正确的网络代理，或者通过 `api_base_url` 配置项将API地址替换为您的反代地址。
 
-## 🚀 使用方法
 
-*   启用插件，并与能够使用函数工具的平台大模型对话，要求其生成/画/图像处理等即可实现自动调用
 
-## 🎨 使用示例
+## 🤔 为何选择本插件？
 
- ![alt text](img/img1.jpg) ![alt text](img/img3.jpg) ![alt text](img/img2.jpg)
+您可能会问，为什么不直接将 AstrBot 中的LLM提供商设置为 `gemini-2.0-flash-exp-image-generation` 等模型来进行图像生成，而是使用一个插件进行单独调用呢？主要因素：
+
+*   免费层级Gemini-API的`gemini-2.0-flash-exp-image-generation等模型`每分钟请求数（RPM）、每日请求数（RPD）、每分钟令牌数（TPM）都很少，单独使用可以避免将限额消耗在非图像生成功能上，专注生图。
+*   gemini-2.0-flash-exp-image-generation等模型`不支持系统调用词、不支持函数调用且上下文长度仅在32K左右的水平`，并不适合作为日常助手使用
+*   ~~本插件实现了会话隔离，避免因多个用户同时使用或单个用户在不同会话中同时使用而导致的问题。~~
+*   本插件提供便捷的反代URL设置，方便您使用反向代理。
+*   本插件提供了更灵活的API Key、模型管理功能，支持顺序轮询和随机选择API Key和切换模型，避免因单个API Key的限制导致的生成失败或长期只使用一个API Key。
+*   支持常见的带有透明度的 "P" 模式QQ表情包。
+*   本插件将功能注册为平台大模型函数工具（新）
 
 ## 🤝 支持与贡献
 
