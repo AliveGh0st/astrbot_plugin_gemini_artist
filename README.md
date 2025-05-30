@@ -52,6 +52,10 @@
 
 ## 更新日志
 
+#### v1.3.1
+-   修复了生成多张图片时，无法正确输出合并消息的问题
+-   修复了错误的使用绝对路径的问题 @[Issue #8](https://github.com/nichinichisou0609/astrbot_plugin_gemini_artist/issues/8)感谢[xu-wish](https://github.com/xu-wish)的反馈
+
 ### v1.3.0
 -   修复了函数调用无法参考多张图片的问题
 -   现在可以通过对话让llm参考自己生成的图片了

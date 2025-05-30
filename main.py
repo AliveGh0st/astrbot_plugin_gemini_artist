@@ -2,6 +2,7 @@ from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 from astrbot.api.all import *
+from astrbot.api.message_components import Node, Plain, Image ,Nodes
 import asyncio
 from io import BytesIO
 import time
@@ -15,10 +16,11 @@ import functools
 from typing import List, Optional, Dict, Tuple
 from collections import deque
 import base64
-import mimetypes
 import time
 from astrbot.core.conversation_mgr import Conversation
 import json
+from pathlib import Path
+
 
 
 @register("gemini_artist_plugin", "nichinichisou", "基于 Google Gemini 多模态模型的AI绘画插件", "1.2.0")
@@ -39,7 +41,7 @@ class GeminiArtist(Star):
         self.max_cached_images = self.config.get("max_cached_images", 5)
 
         # 设置插件的临时文件目录
-        shared_data_path = "/AstrBot/data"
+        shared_data_path = Path(__file__).resolve().parent.parent.parent
         self.plugin_temp_base_dir = os.path.join(shared_data_path, "gemini_artist_temp")
         os.makedirs(self.plugin_temp_base_dir, exist_ok=True)
         self.temp_dir = self.plugin_temp_base_dir
@@ -558,17 +560,16 @@ class GeminiArtist(Star):
                         chain.append(Image.fromFileSystem(img_path))
                 if chain:
                     # await self.add_response_to_conversation(text_response, image_paths, event)
-                    image_urls_for_llm_request = []
-                    for img_path in image_paths:
-                        if img_path and os.path.exists(img_path) and os.path.getsize(img_path) > 0:
-                            image_urls_for_llm_request.append(self.image_to_base64_data_url(img_path))
+                    # image_urls_for_llm_request = []
+                    # for img_path in image_paths:
+                    #     if img_path and os.path.exists(img_path) and os.path.getsize(img_path) > 0:
+                    #         image_urls_for_llm_request.append(self.image_to_base64_data_url(img_path))
                     tool_output_data = {
                         "generated_text": text_response,
                         "number_of_images_generated": len(image_paths),
-                        "user_instruction_for_llm": (f"我已经使用Gemini为你生成了 {len(image_paths)} 张图片"
+                        "user_instruction_for_llm": (f"你生成了 {len(image_paths)} 张图片"
                     "这些图片已经发送给用户，并且用户可以通过图片索引（例如，image_index=1 代表最新生成的这张/这些图片）来引用它们进行后续操作。"
-                    "请根据用户的原始意图和这些新生成的图文内容继续对话。"
-                )
+                    "请根据用户的原始意图和这些新生成的图文内容继续对话。" )
                         }
                             # 工具的返回值应该是这个JSON字符串
                             # 当LLM调用此工具后，这个字符串会作为工具结果进入LLM的上下文
@@ -580,35 +581,58 @@ class GeminiArtist(Star):
                     else:
                         yield event.plain_result("抱歉，未能生成有效内容。")
                 return
-
+            else:
             # 如果有多张图片，尝试以合并转发消息的形式发送
-            bot_id_for_node_str = event.message_obj.self_id or self.robot_id_from_config or self.config.get("bot_id")
-            bot_id_for_node = int(str(bot_id_for_node_str).strip()) if bot_id_for_node_str and str(bot_id_for_node_str).strip().isdigit() else None
-            if bot_id_for_node is None:
-                logger.error(f"gemini_draw: 无法确定有效的 bot_id。尝试普通发送。")
-                chain = []
+                bot_id_for_node_str = event.message_obj.self_id or self.robot_id_from_config or self.config.get("bot_id")
+                bot_id_for_node = int(str(bot_id_for_node_str).strip()) if bot_id_for_node_str and str(bot_id_for_node_str).strip().isdigit() else None
+                if bot_id_for_node is None:
+                    logger.error(f"gemini_draw: 无法确定有效的 bot_id。尝试普通发送。")
+                    chain = []
+                    if text_response:
+                        chain.append(Plain(text_response))
+                    for img_path in image_paths:
+                        if img_path and os.path.exists(img_path) and os.path.getsize(img_path) > 0:
+                            chain.append(Image.fromFileSystem(img_path))
+                    if chain:
+                        yield event.chain_result(chain)
+                    else:
+                        yield event.plain_result("抱歉，未能生成有效内容。")
+                    return
+
+                bot_name_for_node = str(self.config.get("bot_name", "绘图助手")).strip() or "绘图助手"
+                ns = Nodes([])
                 if text_response:
-                    chain.append(Plain(text_response))
-                for img_path in image_paths:
+                    paragraphs = text_response.split('\n\n')
+                if paragraphs:
+                    ns.nodes.append(Node(
+                            user_id=bot_id_for_node,nickname=bot_name_for_node,content=[Plain(paragraphs[0])]
+                        ))
+                for idx, img_path in enumerate(image_paths): 
                     if img_path and os.path.exists(img_path) and os.path.getsize(img_path) > 0:
-                        chain.append(Image.fromFileSystem(img_path))
-                if chain:
-                    yield event.chain_result(chain)
+                        if len(paragraphs) == 1:
+                            content = [Plain(""), Image.fromFileSystem(img_path)]
+                        elif idx < len(paragraphs):
+                            content = [Plain(paragraphs[idx+1]), Image.fromFileSystem(img_path)]
+                        else:
+                            content = [Plain(""), Image.fromFileSystem(img_path)]
+                        
+                        ns.nodes.append(Node(
+                            user_id=bot_id_for_node,
+                            nickname=bot_name_for_node,
+                            content=content
+                        ))
+                if ns:
+                    tool_output_data = {
+                        "generated_text": text_response,
+                        "number_of_images_generated": len(image_paths),
+                        "user_instruction_for_llm": (f"你生成了 {len(image_paths)} 张图片"
+                    "这些图片已经发送给用户，并且用户可以通过图片索引（例如，image_index=1 代表最新生成的这张/这些图片）来引用它们进行后续操作。"
+                    "请根据用户的原始意图和这些新生成的图文内容继续对话。")
+                    }
+                    yield json.dumps(tool_output_data, ensure_ascii=False)
+                    yield event.chain_result([ns])
                 else:
                     yield event.plain_result("抱歉，未能生成有效内容。")
-                return
-
-            bot_name_for_node = str(self.config.get("bot_name", "绘图助手")).strip() or "绘图助手"
-            nodes = []
-            if text_response:
-                nodes.append(Node(user_id=bot_id_for_node, nickname=bot_name_for_node, message_chain=[Plain(text_response)]))
-            for img_path in image_paths:
-                if img_path and os.path.exists(img_path) and os.path.getsize(img_path) > 0:
-                    nodes.append(Node(user_id=bot_id_for_node, nickname=bot_name_for_node, message_chain=[Image.fromFileSystem(img_path)]))
-            if nodes:
-                yield event.node_custom_result(nodes)
-            else:
-                yield event.plain_result("抱歉，未能生成有效内容。")
 
         except Exception as e:
             logger.error(f"gemini_draw 未知错误: {e}", exc_info=True)
@@ -637,7 +661,7 @@ class GeminiArtist(Star):
                 client = genai.Client(api_key=current_key_to_try, http_options=http_options)
                 contents = []
                 if text_prompt:
-                    contents.append(text_prompt+",请使用中文回复")
+                    contents.append(text_prompt+",请使用中文回复,文字段与图片对应")
                 for img_item in images_pil:
                     contents.append(img_item)
                 if not contents:
@@ -691,10 +715,6 @@ class GeminiArtist(Star):
                 if not self.random_api_key_selection:
                     self.current_api_key_index = (key_idx_to_use + 1) % len(self.api_keys)
                 return result
-
-            except genai.APIError as google_api_err:
-                logger.error(f"gemini_generate: Google APIError (密钥 {key_idx_to_use}): {google_api_err}", exc_info=True)
-                last_exception = google_api_err
             except Exception as e:
                 logger.error(f"gemini_generate: API处理失败 (密钥 {key_idx_to_use}): {str(e)}", exc_info=True)
                 last_exception = e
