@@ -1,6 +1,6 @@
 name: astrbot_plugin_gemini_artist
 desc: 提供调用Gemini系列的生图模型的函数工具
 help: 一个调用Gemini系列的生图模型的函数工具
-version: v1.3.1
+version: v1.3.2
 author: nichinichisou
 repo: https://github.com/nichinichisou0609/astrbot_plugin_gemini_artist
