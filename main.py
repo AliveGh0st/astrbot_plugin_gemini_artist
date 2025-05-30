@@ -187,78 +187,78 @@ class GeminiArtist(Star):
                 except Exception:
                     pass
             return None
-    def image_to_base64_data_url(self, image_path: str) -> str:
-        """
-        将图片文件直接转换为 base64 data URL，不进行任何压缩或优化。
-        """
-        mime_type = "image/jpeg"
-        output_format_pil = "jpeg" # Pillow 保存时使用的格式名
+    # def image_to_base64_data_url(self, image_path: str) -> str:
+    #     """
+    #     将图片文件直接转换为 base64 data URL，不进行任何压缩或优化。
+    #     """
+    #     mime_type = "image/jpeg"
+    #     output_format_pil = "jpeg" # Pillow 保存时使用的格式名
 
-        try:
-            # 1. 使用 PIL 打开原始 PNG 图片
-            with PILImage.open(image_path) as img_pil:
-                # buffer = io.BytesIO()
-                save_dir = os.path.join(self.temp_dir, f"gemini_base64_{time.time()}_{random.randint(100,999)}.png")
-                width, height = img_pil.size
-                # save_options = {
-                #     'format': output_format_pil,
-                #     'optimize': True,
-                #     'compress_level': 7 # 调整压缩级别 (0-9)，7 通常是不错的平衡
-                # }
-                new_width = 200
-                ratio = new_width / width
-                new_height = int(height * ratio)
-                new_size = (new_width, new_height)
-                resized_img = img_pil.resize(new_size, PILImage.LANCZOS)
-                buffer = BytesIO()
-                resized_img.convert("RGB").save(buffer, format="JPEG", quality=95)  # quality可调
-                # jpeg_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
-                logger.debug(f"BytesIO buffer 已创建。")
+    #     try:
+    #         # 1. 使用 PIL 打开原始 PNG 图片
+    #         with PILImage.open(image_path) as img_pil:
+    #             # buffer = io.BytesIO()
+    #             save_dir = os.path.join(self.temp_dir, f"gemini_base64_{time.time()}_{random.randint(100,999)}.png")
+    #             width, height = img_pil.size
+    #             # save_options = {
+    #             #     'format': output_format_pil,
+    #             #     'optimize': True,
+    #             #     'compress_level': 7 # 调整压缩级别 (0-9)，7 通常是不错的平衡
+    #             # }
+    #             new_width = 200
+    #             ratio = new_width / width
+    #             new_height = int(height * ratio)
+    #             new_size = (new_width, new_height)
+    #             resized_img = img_pil.resize(new_size, PILImage.LANCZOS)
+    #             buffer = BytesIO()
+    #             resized_img.convert("RGB").save(buffer, format="JPEG", quality=95)  # quality可调
+    #             # jpeg_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
+    #             logger.debug(f"BytesIO buffer 已创建。")
 
-                try:
-                    logger.debug(f"尝试将 resized_img (类型: {type(resized_img)}, 模式: {resized_img.mode}, 尺寸: {resized_img.size}) 保存到 buffer，格式: {output_format_pil}")
-                    # resized_img.save(buffer, format=output_format_pil)
-                    # 在调用 getvalue() 之前，可以检查 buffer 指针的位置
-                    buffer_position_after_save = buffer.tell()
-                    logger.debug(f"resized_img.save(buffer) 执行完毕。Buffer 当前指针位置: {buffer_position_after_save}")
-                    if buffer_position_after_save == 0:
-                        logger.warning(f"警告: resized_img.save(buffer) 后，buffer 指针仍在0，可能未写入数据。图片: {image_path}")
-                except Exception as save_to_buffer_err:
-                    logger.error(f"Pillow save to buffer 失败 for {image_path}: {save_to_buffer_err}", exc_info=True)
-                    return None
+    #             try:
+    #                 logger.debug(f"尝试将 resized_img (类型: {type(resized_img)}, 模式: {resized_img.mode}, 尺寸: {resized_img.size}) 保存到 buffer，格式: {output_format_pil}")
+    #                 # resized_img.save(buffer, format=output_format_pil)
+    #                 # 在调用 getvalue() 之前，可以检查 buffer 指针的位置
+    #                 buffer_position_after_save = buffer.tell()
+    #                 logger.debug(f"resized_img.save(buffer) 执行完毕。Buffer 当前指针位置: {buffer_position_after_save}")
+    #                 if buffer_position_after_save == 0:
+    #                     logger.warning(f"警告: resized_img.save(buffer) 后，buffer 指针仍在0，可能未写入数据。图片: {image_path}")
+    #             except Exception as save_to_buffer_err:
+    #                 logger.error(f"Pillow save to buffer 失败 for {image_path}: {save_to_buffer_err}", exc_info=True)
+    #                 return None
 
-                image_bytes = buffer.getvalue()
-                logger.debug(f"buffer.getvalue() 执行完毕。获取到的 image_bytes 长度: {len(image_bytes)}")
+    #             image_bytes = buffer.getvalue()
+    #             logger.debug(f"buffer.getvalue() 执行完毕。获取到的 image_bytes 长度: {len(image_bytes)}")
 
-                if not image_bytes:
-                    logger.error(f"从 buffer 获取的 image_bytes 为空 (长度为0)。图片路径: {image_path}. Buffer 指针位置: {buffer.tell()}")
-                    return None
+    #             if not image_bytes:
+    #                 logger.error(f"从 buffer 获取的 image_bytes 为空 (长度为0)。图片路径: {image_path}. Buffer 指针位置: {buffer.tell()}")
+    #                 return None
 
-                try:
-                    encoded_string = base64.b64encode(image_bytes).decode('utf-8')
-                    logger.debug(f"Base64编码完成。Encoded_string 长度: {len(encoded_string)}")
-                except Exception as b64_err:
-                    logger.error(f"Base64编码或解码失败: {b64_err}", exc_info=True)
-                    return None
+    #             try:
+    #                 encoded_string = base64.b64encode(image_bytes).decode('utf-8')
+    #                 logger.debug(f"Base64编码完成。Encoded_string 长度: {len(encoded_string)}")
+    #             except Exception as b64_err:
+    #                 logger.error(f"Base64编码或解码失败: {b64_err}", exc_info=True)
+    #                 return None
 
 
-                if not encoded_string: # 理论上，如果 image_bytes 非空，这里不应该为空
-                    logger.error(f"Base64编码后 encoded_string 仍然为空。图片路径: {image_path}, image_bytes长度: {len(image_bytes)}")
-                    return None
+    #             if not encoded_string: # 理论上，如果 image_bytes 非空，这里不应该为空
+    #                 logger.error(f"Base64编码后 encoded_string 仍然为空。图片路径: {image_path}, image_bytes长度: {len(image_bytes)}")
+    #                 return None
 
-                final_url = f"data:{mime_type};base64,{encoded_string}"
-                logger.info(f"图片 {image_path} 已成功转换为Base64，输出URL前缀: {final_url[:70]}...")
-                return final_url
+    #             final_url = f"data:{mime_type};base64,{encoded_string}"
+    #             logger.info(f"图片 {image_path} 已成功转换为Base64，输出URL前缀: {final_url[:70]}...")
+    #             return final_url
 
-        except FileNotFoundError:
-            logger.error(f"Base64转换：文件未找到在最外层try-except: {image_path}")
-            return None
-        except PILImage.UnidentifiedImageError:
-            logger.error(f"Base64转换：Pillow无法识别图片文件 (最外层try-except) {image_path}", exc_info=True)
-            return None
-        except Exception as e:
-            logger.error(f"image_to_base64_data_url 中发生未知错误 (最外层try-except) ({image_path}): {e}", exc_info=True)
-            return None
+    #     except FileNotFoundError:
+    #         logger.error(f"Base64转换：文件未找到在最外层try-except: {image_path}")
+    #         return None
+    #     except PILImage.UnidentifiedImageError:
+    #         logger.error(f"Base64转换：Pillow无法识别图片文件 (最外层try-except) {image_path}", exc_info=True)
+    #         return None
+    #     except Exception as e:
+    #         logger.error(f"image_to_base64_data_url 中发生未知错误 (最外层try-except) ({image_path}): {e}", exc_info=True)
+    #         return None
 
   
     # async def add_response_to_conversation(self,text: str, image_paths: List[str], event: AstrMessageEvent):
@@ -396,7 +396,9 @@ class GeminiArtist(Star):
             identifier_to_check = event.message_obj.group_id if event.message_obj.group_id else user_id
             if str(identifier_to_check) not in [str(whitelisted_id) for whitelisted_id in self.group_whitelist]:
                 return
-
+        if group_id == "":
+            group_id = user_id
+            logger.debug(f"收到来自用户 {user_id} group_id {group_id} 的消息。")
         for msg_component in event.get_messages():
             if isinstance(msg_component, Image) and hasattr(msg_component, 'url') and msg_component.url:
                 self.store_user_image(user_id, group_id, msg_component.url, getattr(msg_component, 'file', None))
@@ -409,7 +411,7 @@ class GeminiArtist(Star):
             prompt (string): 图像的文本描述。需要包含“生成”、“图片”等关键词。
             image_index (number, optional): 要使用的来自用户历史记录的倒数几张图片作为参考。默认为0 (不使用)。
                                             1表示最新的1张图片，2表示最新的2张，以此类推。
-            reference_bot (boolean, optional): 是否参考的是你生成的图片
+            reference_bot (boolean, optional): 是否参考的是你先前生成的图片(与来自与你聊天记录不同), 默认为 False。
         '''
         if not self.api_keys:
             yield event.plain_result("请联系管理员配置Gemini API密钥。")
@@ -459,7 +461,6 @@ class GeminiArtist(Star):
                             if replied_image_pil:
                                 logger.info("成功从直接引用的消息中加载了图片作为参考。")
                                 all_images_pil.append(replied_image_pil)
-                            break
                 if replied_image_pil:
                     logger.info("使用直接引用的图片作为唯一参考，忽略 image_index 和 reference_user_id。")
                     image_index = 0
