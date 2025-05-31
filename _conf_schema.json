@@ -49,7 +49,7 @@
     },
     "wait_time":{
         "type": "int",
-        "title": "指令调用的等待时间",
+        "description": "指令调用的等待时间",
         "hint":"默认为30秒",
         "default": 30,
         "min": 10
