@@ -20,10 +20,11 @@ import time
 from astrbot.core.conversation_mgr import Conversation
 import json
 from pathlib import Path
+import re
 
 
 
-@register("gemini_artist_plugin", "nichinichisou", "基于 Google Gemini 多模态模型的AI绘画插件", "1.2.0")
+@register("gemini_artist_plugin", "nichinichisou", "基于 Google Gemini 多模态模型的AI绘画插件", "1.3.3")
 class GeminiArtist(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -35,6 +36,11 @@ class GeminiArtist(Star):
         self.group_whitelist = config.get("group_whitelist", [])
         self.robot_id_from_config = config.get("robot_self_id") 
         self.random_api_key_selection = config.get("random_api_key_selection", False)
+        # 存储正在等待输入的用户，键为 (user_id, group_id)
+        self.waiting_users = {}  # {(user_id, group_id): expiry_time}
+        # 存储用户收集到的文本和图片，键为 (user_id, group_id)
+        self.user_inputs = {} # {(user_id, group_id): {'messages': [{'text': '', 'images': [], 'timestamp': float}]}}
+        self.wait_time_from_config = config.get("wait_time", 30)
 
         # 存储用户发送的图片URL缓存
         self.image_history_cache: Dict[Tuple[str, str], deque[Tuple[str, Optional[str]]]] = {}
@@ -505,7 +511,7 @@ class GeminiArtist(Star):
                     all_images_pil.append(pil_image_from_cache)
                     fetched_count +=1
                 else:
-                    logger.warning(f"未能加载用户 {user_id_for_cache_lookup} (上下文 {session_id_for_cache_lookup}) 的倒数第 {i} 张图片。")
+                    logger.warning(f"未能加载用户 {user_id_for_cache_lookup} (上下文 {group_id_for_cache_lookup}) 的倒数第 {i} 张图片。")
             
             if fetched_count == 0 and num_images_to_fetch > 0 : # 如果指定要图但一张都没取到
                 message = f"尝试获取最新的 {num_images_to_fetch} 张图片，但未能成功加载任何一张。"
@@ -638,6 +644,287 @@ class GeminiArtist(Star):
         except Exception as e:
             logger.error(f"gemini_draw 未知错误: {e}", exc_info=True)
             yield event.plain_result(f"处理请求时发生意外错误: {str(e)}")
+    @filter.command("draw")
+    async def initiate_creation_session(self, event: AstrMessageEvent):
+        """处理 /draw 命令，启动绘图会话。(旧版功能)"""
+        if not self.api_keys:
+            yield event.plain_result("请联系管理员配置Gemini API密钥 (api_keys)")
+            return
+
+        if not hasattr(event, 'message_obj') or not hasattr(event.message_obj, 'type'):
+             logger.error(f"initiate_creation_session: 事件对象缺少 message_obj 或 type 属性: {type(event)}")
+             yield event.plain_result("处理消息类型时出错，请联系管理员。")
+             return
+
+        user_id = event.get_sender_id()
+        user_name = event.get_sender_name()
+        
+        group_id = user_id 
+        is_group_message = hasattr(event.message_obj, 'group_id') and event.message_obj.group_id is not None and event.message_obj.group_id != ""
+
+
+        if is_group_message:
+            group_id = event.message_obj.group_id
+        
+        if self.group_whitelist:
+            identifier_to_check = group_id if is_group_message else user_id
+            if str(identifier_to_check) not in [str(whitelisted_id) for whitelisted_id in self.group_whitelist]:
+                logger.info(f"initiate_creation_session: 用户/群组 {identifier_to_check} 不在白名单中，已忽略 /draw 命令。")
+                return # No reply for non-whitelisted
+
+        session_key = (user_id, str(group_id)) # Ensure group_id is string for key consistency
+
+        if session_key in self.waiting_users and time.time() < self.waiting_users[session_key]: # Check expiry
+             expiry_time = self.waiting_users[session_key]
+             remaining_time = int(expiry_time - time.time())
+             yield event.plain_result(f"您已经在当前会话有一个正在进行的绘制任务，请先完成或等待超时 ({remaining_time}秒后)。")
+             return
+        elif session_key in self.waiting_users: # Expired entry
+            del self.waiting_users[session_key]
+            if session_key in self.user_inputs:
+                del self.user_inputs[session_key]
+
+
+        self.waiting_users[session_key] = time.time() + self.wait_time_from_config
+        self.user_inputs[session_key] = {'messages': []}
+        
+        logger.debug(f"Gemini_Draw (Command): User {user_id} started draw. Session ID: {group_id}, Session Key: {session_key}. Waiting state set.")
+        yield event.plain_result(f"好的 {user_name}，请在{self.wait_time_from_config}秒内发送文本描述和可能需要的图片, 然后发送包含'start'或'开始'的消息开始生成。")
+
+    @filter.event_message_type(EventMessageType.ALL)
+    async def collect_user_inputs(self, event: AstrMessageEvent):
+        """处理后续消息，收集用户输入或触发 /draw 会话的生成。(旧版功能)"""
+        if not hasattr(event, 'message_obj') or not hasattr(event.message_obj, 'type'):
+             return 
+
+        user_id = event.get_sender_id()
+        
+        # 忽略机器人自身消息
+        if self.robot_id_from_config and user_id == self.robot_id_from_config:
+            return
+
+        current_group_id = user_id 
+        is_group_message = hasattr(event.message_obj, 'group_id') and event.message_obj.group_id is not None and event.message_obj.group_id != ""
+        if is_group_message:
+            current_group_id = event.message_obj.group_id
+        
+        # 白名单检查 (同样应用于后续消息，确保只有授权会话可以继续)
+        if self.group_whitelist:
+            identifier_to_check = current_group_id if is_group_message else user_id
+            if str(identifier_to_check) not in [str(whitelisted_id) for whitelisted_id in self.group_whitelist]:
+                return
+
+        current_session_key = (user_id, str(current_group_id))
+
+        # logger.debug(f"collect_user_inputs: Processing message. User ID: {user_id}, Session ID: {current_group_id}, Session Key: {current_session_key}")
+        # logger.debug(f"collect_user_inputs: Current waiting users keys: {list(self.waiting_users.keys())}")
+
+        if current_session_key not in self.waiting_users:
+            # logger.debug(f"collect_user_inputs: Session key {current_session_key} not found in waiting users. Ignoring message for /draw flow.")
+            return # Not a user we are waiting for in the /draw flow
+
+        # logger.debug(f"collect_user_inputs: Session key {current_session_key} IS in waiting users. Processing for /draw flow.")
+
+        if time.time() > self.waiting_users[current_session_key]:
+            logger.debug(f"collect_user_inputs: Session {current_group_id} for user {user_id} (key {current_session_key}) timed out for /draw flow.")
+            del self.waiting_users[current_session_key]
+            if current_session_key in self.user_inputs:
+                del self.user_inputs[current_session_key]
+            yield event.plain_result("等待超时，您的 /draw 会话已结束。请重新使用 /draw 命令。")
+            return
+
+        message_text_raw = event.message_str.strip()
+        keywords = ["start", "开始"] # 触发生成的关键词
+        # 检查是否包含关键词，同时确保不是在输入另一个命令 (如 /draw 本身)
+        contains_keyword = any(keyword in message_text_raw.lower() for keyword in keywords)
+        
+        # 如果消息是 `/draw` 命令本身，则它应该由 `initiate_creation_session` 处理，而不是在这里收集
+        is_command = message_text_raw.startswith("/") or message_text_raw.lower().startswith("draw")
+        if is_command and not contains_keyword:
+            # logger.debug(f"collect_user_inputs: 消息是命令 ({message_text_raw}) 且不包含 start/开始，已忽略。")
+            return
+
+
+        current_text_for_prompt = message_text_raw
+        current_images_pil: List[PILImage.Image] = []
+
+        message_chain = event.get_messages()
+        for msg_component in message_chain:
+            if isinstance(msg_component, Image) and hasattr(msg_component, 'url') and msg_component.url:
+                try:
+                    # 旧版使用 download_image_by_url，返回本地路径
+                    # 然后用 PILImage.open 打开。
+                    # 新版有 download_pil_image_from_url 直接返回 PIL Image。
+                    # 为了保持“整块添加”，我们暂时用旧的方式，或者适配到新的。
+                    # 适配到新的：
+                    pil_img = await self.download_pil_image_from_url(msg_component.url, "用户为/draw会话发送的图片")
+                    if pil_img:
+                        current_images_pil.append(pil_img)
+                        logger.info(f"collect_user_inputs: Successfully downloaded and converted image via new method: {msg_component.url} for /draw session key {current_session_key}")
+                    else:
+                        yield event.plain_result(f"无法处理您发送的一张图片（下载或转换失败），请尝试其他图片。") # Inform user
+                        # return # Optional: stop processing if one image fails
+                except Exception as e:
+                    logger.error(f"collect_user_inputs: 处理 /draw 会话的图片失败 (key {current_session_key}): {str(e)}", exc_info=True)
+                    yield event.plain_result(f"处理图片时发生错误: {str(e)}。请稍后再试或尝试其他图片。")
+                    return # Stop processing on error
+
+        # 确保 user_inputs 中有此会话 (理论上 initiate 时已创建)
+        if current_session_key not in self.user_inputs:
+             logger.error(f"collect_user_inputs: 用户 {user_id} 在会话 {current_group_id} (key {current_session_key}) 中等待，但 user_inputs 状态丢失。正在清理。")
+             if current_session_key in self.waiting_users:
+                 del self.waiting_users[current_session_key]
+             yield event.plain_result("您的 /draw 会话状态异常，请重试。")
+             return
+
+        # 存储本次消息的内容
+        # 只有在文本或图片非空时才记录，避免空消息污染
+        if current_text_for_prompt or current_images_pil:
+            message_data = {
+              'text': current_text_for_prompt, # Store raw text, keyword removal happens at generation
+              'images': current_images_pil,   # Store PIL images
+              'timestamp': time.time()
+            }
+            self.user_inputs[current_session_key]['messages'].append(message_data)
+            logger.debug(f"collect_user_inputs: Stored message for /draw session {current_session_key}. Text: '{current_text_for_prompt[:30]}...', Images: {len(current_images_pil)}")
+
+
+        if contains_keyword:
+            logger.debug(f"Gemini_Draw (Command): Start keyword detected in session {current_group_id} (key {current_session_key}). Processing messages.")
+            
+            # 从 user_inputs 中聚合所有为此会话收集的消息
+            collected_session_messages = self.user_inputs[current_session_key].get('messages', [])
+            # 按时间戳排序确保顺序
+            collected_session_messages.sort(key=lambda x: x['timestamp'])
+
+            all_text_parts = []
+            all_pil_images_for_api: List[PILImage.Image] = []
+
+            for msg_data in collected_session_messages:
+                text_part = msg_data.get('text', '')
+                # 从文本中移除触发关键词，避免它们进入最终的prompt
+                for kw in keywords:
+                    # Regex to remove whole word, case insensitive
+                    text_part = re.sub(r'\b' + re.escape(kw) + r'\b', '', text_part, flags=re.IGNORECASE).strip()
+                if text_part:
+                    all_text_parts.append(text_part)
+                
+                all_pil_images_for_api.extend(msg_data.get('images', [])) # images are already PIL
+
+            final_prompt_text = '\n'.join(all_text_parts).strip()
+
+            # 清理会话状态
+            del self.waiting_users[current_session_key]
+            del self.user_inputs[current_session_key]
+
+            if not final_prompt_text and not all_pil_images_for_api:
+                yield event.plain_result("您没有提供任何文本描述或图片内容给 /draw 会话。")
+                return
+
+            yield event.plain_result("收到开始指令，正在为您生成图片，请稍候...")
+            
+            try:
+                # 调用核心的 gemini_generate (新版的)
+                logger.debug(f"collect_user_inputs: Calling gemini_generate for /draw session. Prompt: '{final_prompt_text[:50]}...', Images: {len(all_pil_images_for_api)}")
+                api_result = await self.gemini_generate(final_prompt_text, all_pil_images_for_api)
+                
+                if api_result is None or not isinstance(api_result, dict): # Should be caught by gemini_generate raising error
+                    logger.error(f"collect_user_inputs: gemini_generate 返回无效结果 for /draw session: {type(api_result)}")
+                    yield event.plain_result("处理图片时发生内部错误（生成器未返回有效数据）。")
+                    return
+
+                text_response = api_result.get('text', '').strip()
+                image_paths = api_result.get('image_paths', []) # List of local file paths
+
+                logger.debug(f"collect_user_inputs (/draw): gemini_generate returned - Text: '{text_response[:50]}...', Images: {len(image_paths)}")
+
+                # 缓存机器人自己生成的图片 (对于 /draw 指令，图片的"owner"是触发指令的用户，但图片本身是机器人发的)
+                # 如果希望这些图片能被 LLM 工具通过 reference_bot=True 引用，则需要用 robot_id 缓存
+                if image_paths and self.robot_id_from_config:
+                    logger.info(f"准备缓存 {len(image_paths)} 张 /draw 生成的图片路径到机器人 {self.robot_id_from_config} 在上下文 {current_group_id} 的历史中...")
+                    for i, img_path in enumerate(image_paths):
+                        if os.path.exists(img_path):
+                            self.store_user_image(
+                                str(self.robot_id_from_config), # Image belongs to the bot
+                                str(current_group_id),        # In the current chat context
+                                img_path,                   # Store the local file path
+                                f"draw_cmd_generated_{i+1}_{os.path.basename(img_path)}"
+                            )
+
+                if not text_response and not image_paths:
+                    logger.warning("collect_user_inputs (/draw): API未返回任何文本或图片内容。")
+                    yield event.plain_result("未能从API获取任何文本或图片内容。")
+                    return
+
+                # 发送结果给用户 (旧版的发送逻辑)
+                if len(image_paths) < 2: # 单图或无图（只有文本）
+                    chain_to_send = []
+                    if text_response:
+                        chain_to_send.append(Plain(text_response))
+                    for img_path in image_paths:
+                        if img_path and os.path.exists(img_path) and os.path.getsize(img_path) > 0:
+                            chain_to_send.append(Image.fromFileSystem(img_path))
+                    
+                    if chain_to_send:
+                        yield event.chain_result(chain_to_send)
+                    else: # Should not happen if previous checks pass
+                        yield event.plain_result("抱歉，未能生成有效内容。")
+                else: # 多张图片，使用 Nodes 合并发送
+                    bot_id_for_node_str = event.message_obj.self_id or self.robot_id_from_config or self.config.get("bot_id")
+                    bot_id_for_node = int(str(bot_id_for_node_str).strip()) if bot_id_for_node_str and str(bot_id_for_node_str).strip().isdigit() else None
+                    
+                    if bot_id_for_node is None:
+                        logger.error("collect_user_inputs (/draw): 无法确定有效的 bot_id 用于合并转发。降级为逐条发送。")
+                        if text_response: yield event.plain_result(text_response)
+                        for img_path in image_paths:
+                            if img_path and os.path.exists(img_path) and os.path.getsize(img_path) > 0:
+                                yield event.chain_result([Image.fromFileSystem(img_path)])
+                        return
+
+                    bot_name_for_node = str(self.config.get("bot_name", "绘图助手")).strip() or "绘图助手"
+                    
+                    # 构建 Nodes
+                    # 旧版逻辑是 text_response 分段对应图片，这里简化：先发总文本，再逐个发图片
+                    nodes_message_list: List[Node] = []
+                    if text_response:
+                         nodes_message_list.append(Node(
+                            user_id=bot_id_for_node, 
+                            nickname=bot_name_for_node, 
+                            content=[Plain(text_response)]
+                        ))
+                    
+                    for img_path in enumerate(image_paths): 
+                        if img_path and os.path.exists(img_path) and os.path.getsize(img_path) > 0:
+                            # Optionally add a small text like "图片 {idx+1}"
+                            # content_for_node = [Plain(f"图片 {idx+1}/{len(image_paths)}"), Image.fromFileSystem(img_path)]
+                            content_for_node = [Image.fromFileSystem(img_path)] # Simpler: just image
+                            nodes_message_list.append(Node(
+                                user_id=bot_id_for_node,
+                                nickname=bot_name_for_node,
+                                content=content_for_node
+                            ))
+                    
+                    if nodes_message_list:
+                        yield event.chain_result([Nodes(nodes_message_list)])
+                    else:
+                        yield event.plain_result("抱歉，未能生成有效内容进行合并转发。")
+                return
+
+            except Exception as e_gen:
+                logger.error(f"collect_user_inputs (/draw): 在 /draw 会话的生成或回复阶段发生错误: {str(e_gen)}", exc_info=True)
+                yield event.plain_result(f"处理您的 /draw 请求时发生错误: {str(e_gen)}")
+                # Ensure session is cleaned up on error too
+                if current_session_key in self.waiting_users: del self.waiting_users[current_session_key]
+                if current_session_key in self.user_inputs: del self.user_inputs[current_session_key]
+                return
+        
+        else: # 未包含触发关键词，且不是命令
+            if current_text_for_prompt.strip() or current_images_pil: 
+                logger.debug(f"collect_user_inputs (/draw): 未检测到开始指令 (key {current_session_key})，收到输入: text='{current_text_for_prompt[:30]}...', images_count={len(current_images_pil)}")
+                yield event.plain_result("已收到您的输入，请继续发送或发送包含'start'或'开始'的消息结束您的 /draw 会话。")
+            # else: (空消息，不回复)
+            #    logger.debug(f"collect_user_inputs (/draw): 收到空消息，不含开始指令 (key {current_session_key})，已忽略。")
+
 
     async def gemini_generate(self, text_prompt: str, images_pil: List[PILImage.Image] = None):
         """
@@ -662,7 +949,7 @@ class GeminiArtist(Star):
                 client = genai.Client(api_key=current_key_to_try, http_options=http_options)
                 contents = []
                 if text_prompt:
-                    contents.append(text_prompt+",请使用中文回复,文字段与图片对应")
+                    contents.append(text_prompt+",请使用中文回复,文字段与图片对应,除非特色要求，图片中不要有文字")
                 for img_item in images_pil:
                     contents.append(img_item)
                 if not contents:

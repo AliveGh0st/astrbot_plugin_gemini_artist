@@ -47,6 +47,13 @@
         "description": "启用后，将在可用的API Key中随机选择一个进行调用；禁用则按顺序轮询。",
         "default": false
     },
+    "wait_time":{
+        "type": "int",
+        "title": "指令调用的等待时间",
+        "hint":"默认为30秒",
+        "default": 30,
+        "min": 10
+    },
     "temp_cleanup_interval_seconds": {
         "type": "int",
         "name": "定时清理 - 执行间隔",
