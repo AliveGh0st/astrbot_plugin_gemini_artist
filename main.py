@@ -949,7 +949,8 @@ class GeminiArtist(Star):
                 client = genai.Client(api_key=current_key_to_try, http_options=http_options)
                 contents = []
                 if text_prompt:
-                    contents.append(text_prompt+"。请使用中文回复,文字段与图片对应,除非特意要求，图片中不要有文字。")
+                    contents.append(text_prompt)
+                    # +"。请使用中文回复,文字段与图片对应,除非特意要求，图片中不要有文字。"
                 for img_item in images_pil:
                     contents.append(img_item)
                 if not contents:
