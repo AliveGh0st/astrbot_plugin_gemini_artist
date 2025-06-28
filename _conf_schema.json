@@ -69,5 +69,18 @@
         "hint": "默认为3天，最小值为1小时",
         "default": 259200,
         "min": 3600 
+    },
+    "enable_base_reference_image": {
+        "type": "bool",
+        "title": "启用默认参考图",
+        "description": "启用后，在没有提供任何其他参考图时，将使用下面配置的默认图片作为生图参考。",
+        "default": false
+    },
+    "base_reference_image_path": {
+        "type": "string",
+        "title": "默认参考图路径",
+        "description": "默认参考图片的本地路径。请使用绝对路径或相对于AstrBot根目录的路径。",
+        "hint": "例如: data/my_style.png",
+        "default": ""
     }
 }

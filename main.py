@@ -36,6 +36,8 @@ class GeminiArtist(Star):
         self.group_whitelist = config.get("group_whitelist", [])
         self.robot_id_from_config = config.get("robot_self_id") 
         self.random_api_key_selection = config.get("random_api_key_selection", False)
+        self.enable_base_reference_image = config.get("enable_base_reference_image", False)
+        self.base_reference_image_path = config.get("base_reference_image_path", "")
         # 存储正在等待输入的用户，键为 (user_id, group_id)
         self.waiting_users = {}  # {(user_id, group_id): expiry_time}
         # 存储用户收集到的文本和图片，键为 (user_id, group_id)
@@ -123,7 +125,7 @@ class GeminiArtist(Star):
         if key not in self.image_history_cache:
             self.image_history_cache[key] = deque(maxlen=self.max_cached_images)
         self.image_history_cache[key].append((image_url, original_filename))
-        logger.info(f"已存储用户 {user_id} group_id {group_id} 图片URL: {image_url} (缓存 {len(self.image_history_cache[key])}/{self.max_cached_images})")
+        logger.debug(f"已存储用户 {user_id} group_id {group_id} 图片URL: {image_url} (缓存 {len(self.image_history_cache[key])}/{self.max_cached_images})")
 
     async def download_pil_image_from_url(self, image_url: str, context_description: str = "图片") -> Optional[PILImage.Image]:
         """
@@ -193,161 +195,33 @@ class GeminiArtist(Star):
                 except Exception:
                     pass
             return None
-    # def image_to_base64_data_url(self, image_path: str) -> str:
-    #     """
-    #     将图片文件直接转换为 base64 data URL，不进行任何压缩或优化。
-    #     """
-    #     mime_type = "image/jpeg"
-    #     output_format_pil = "jpeg" # Pillow 保存时使用的格式名
 
-    #     try:
-    #         # 1. 使用 PIL 打开原始 PNG 图片
-    #         with PILImage.open(image_path) as img_pil:
-    #             # buffer = io.BytesIO()
-    #             save_dir = os.path.join(self.temp_dir, f"gemini_base64_{time.time()}_{random.randint(100,999)}.png")
-    #             width, height = img_pil.size
-    #             # save_options = {
-    #             #     'format': output_format_pil,
-    #             #     'optimize': True,
-    #             #     'compress_level': 7 # 调整压缩级别 (0-9)，7 通常是不错的平衡
-    #             # }
-    #             new_width = 200
-    #             ratio = new_width / width
-    #             new_height = int(height * ratio)
-    #             new_size = (new_width, new_height)
-    #             resized_img = img_pil.resize(new_size, PILImage.LANCZOS)
-    #             buffer = BytesIO()
-    #             resized_img.convert("RGB").save(buffer, format="JPEG", quality=95)  # quality可调
-    #             # jpeg_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
-    #             logger.debug(f"BytesIO buffer 已创建。")
+    def _load_base_reference_image(self) -> Optional[PILImage.Image]:
+        """
+        从配置的路径加载默认的基础参考图。
+        """
+        if not self.base_reference_image_path:
+            return None
 
-    #             try:
-    #                 logger.debug(f"尝试将 resized_img (类型: {type(resized_img)}, 模式: {resized_img.mode}, 尺寸: {resized_img.size}) 保存到 buffer，格式: {output_format_pil}")
-    #                 # resized_img.save(buffer, format=output_format_pil)
-    #                 # 在调用 getvalue() 之前，可以检查 buffer 指针的位置
-    #                 buffer_position_after_save = buffer.tell()
-    #                 logger.debug(f"resized_img.save(buffer) 执行完毕。Buffer 当前指针位置: {buffer_position_after_save}")
-    #                 if buffer_position_after_save == 0:
-    #                     logger.warning(f"警告: resized_img.save(buffer) 后，buffer 指针仍在0，可能未写入数据。图片: {image_path}")
-    #             except Exception as save_to_buffer_err:
-    #                 logger.error(f"Pillow save to buffer 失败 for {image_path}: {save_to_buffer_err}", exc_info=True)
-    #                 return None
+        # 将路径相对于 AstrBot 根目录解析
+        astrbot_root = Path(__file__).resolve().parent.parent.parent.parent
+        image_path = Path(self.base_reference_image_path)
+        if not image_path.is_absolute():
+            image_path = astrbot_root / image_path
 
-    #             image_bytes = buffer.getvalue()
-    #             logger.debug(f"buffer.getvalue() 执行完毕。获取到的 image_bytes 长度: {len(image_bytes)}")
-
-    #             if not image_bytes:
-    #                 logger.error(f"从 buffer 获取的 image_bytes 为空 (长度为0)。图片路径: {image_path}. Buffer 指针位置: {buffer.tell()}")
-    #                 return None
-
-    #             try:
-    #                 encoded_string = base64.b64encode(image_bytes).decode('utf-8')
-    #                 logger.debug(f"Base64编码完成。Encoded_string 长度: {len(encoded_string)}")
-    #             except Exception as b64_err:
-    #                 logger.error(f"Base64编码或解码失败: {b64_err}", exc_info=True)
-    #                 return None
-
-
-    #             if not encoded_string: # 理论上，如果 image_bytes 非空，这里不应该为空
-    #                 logger.error(f"Base64编码后 encoded_string 仍然为空。图片路径: {image_path}, image_bytes长度: {len(image_bytes)}")
-    #                 return None
-
-    #             final_url = f"data:{mime_type};base64,{encoded_string}"
-    #             logger.info(f"图片 {image_path} 已成功转换为Base64，输出URL前缀: {final_url[:70]}...")
-    #             return final_url
-
-    #     except FileNotFoundError:
-    #         logger.error(f"Base64转换：文件未找到在最外层try-except: {image_path}")
-    #         return None
-    #     except PILImage.UnidentifiedImageError:
-    #         logger.error(f"Base64转换：Pillow无法识别图片文件 (最外层try-except) {image_path}", exc_info=True)
-    #         return None
-    #     except Exception as e:
-    #         logger.error(f"image_to_base64_data_url 中发生未知错误 (最外层try-except) ({image_path}): {e}", exc_info=True)
-    #         return None
-
-  
-    # async def add_response_to_conversation(self,text: str, image_paths: List[str], event: AstrMessageEvent):
-    #     """
-    #     将生成的内容添加到当前对话上下文中。
-    #     """
-    #     text_response = text
-    #     image_paths = image_paths
-    #     uid = event.unified_msg_origin
-    #     conversation_manager = self.context.conversation_manager
-    #     curr_cid = await conversation_manager.get_curr_conversation_id(uid)
-    #     conversation = await self.context.conversation_manager.get_conversation(uid, curr_cid)
-        # current_history_list = []
-        # # if conversation.history:
-        # #     try:
-        # #         loaded_history = json.loads(conversation.history)
-        # #         if isinstance(loaded_history, list):
-        # #             current_history_list = loaded_history
-        # #         else:
-        # #             # self.logger.warning(f"对话历史格式不正确 (非列表) for {uid}/{curr_cid}，将重置为空列表。")
-        # #             print(f"对话历史格式不正确 (非列表) for {uid}/{curr_cid}，将重置为空列表。")
-        # #     except json.JSONDecodeError:
-        # #         # self.logger.error(f"解析对话历史失败 for {uid}/{curr_cid}，将重置为空列表。History: {conversation.history[:100]}...")
-        # #         print(f"解析对话历史失败 for {uid}/{curr_cid}，将重置为空列表。")
-
-
-        # # --- 3. 格式化插件的输出为助手消息 ---
-        # user_message_content_parts = []
-
-        # # 处理文本部分
-        # if text_response: # 确保 text_response 是你插件生成的文本
-        #     user_message_content_parts.append({
-        #         "type": "text",
-        #         "text": "我调用了你的生图功能，但是你无法查看到内容，为了接下来的对话，我将生成的图片发送给你"
-        #     })
-
-        # # 处理图片部分
-        # for img_path in image_paths: # 确保 image_paths 是你插件生成的图片路径列表
-        #     if img_path and os.path.exists(img_path) and os.path.getsize(img_path) > 0:
-        #         base64_url = self.image_to_base64_data_url(img_path)
-        #         # if base64_url:
-        #         user_message_content_parts.append({
-        #             "type": "image_url",
-        #             "image_url": {"url": base64_url}
-        #         })
-
-        # # if user_message_content_parts: # 确保有内容可添加
-        # #     # 如果有图片或混合内容，content是列表
-        # #     final_assistant_content: str | list
-        # #     if len(user_message_content_parts) == 1 and user_message_content_parts[0]["type"] == "text":
-        # #         final_assistant_content = user_message_content_parts[0]["text"]
-        # #     else:
-        # #         final_assistant_content = user_message_content_parts
-        #     new_uesr_message = {
-        #         "role": "user",
-        #         "content": user_message_content_parts
-        #     }
-        #     new_assistant_message = {
-        #         "role": "assistant",
-        #         "content": "好的"
-        #     }
-
-        #     # --- 4. 追加到历史列表 ---
-        #     current_history_list.append(new_uesr_message)
-        #     current_history_list.append(new_assistant_message)
-
-        #     # --- 5. 更新对话对象 ---
-        #     existing_history = json.loads(conversation.history)
-        #     merged_history = existing_history+current_history_list
-        #     conversation.history = json.dumps(merged_history, ensure_ascii=False)
-        #     conversation.updated_at = int(time.time())
-
-        #     # --- 6. 持久化对话 ---
-        #     try:
-        #         # BaseDatabase 有一个 `update_conversation` 方法，接收整个 Conversation 对象
-        #             await conversation_manager.db.update_conversation(uid,curr_cid,conversation.history)
-        #             # self.logger.info(f"对话 {curr_cid} 历史已更新。")
-        #             print(f"对话 {curr_cid} 历史已更新。")
-        #     except Exception as e:
-        #         # self.logger.error(f"持久化对话历史失败 for {uid}/{curr_cid}: {e}")
-        #         print(f"持久化对话历史失败 for {uid}/{curr_cid}: {e}")
-        
-
+        if image_path.exists() and image_path.is_file():
+            try:
+                logger.info(f"正在加载默认参考图: {image_path}")
+                img_pil = PILImage.open(image_path)
+                img_pil.load()  # 确保图片数据已加载
+                # 转换为RGBA以获得最佳兼容性
+                return img_pil.convert('RGBA') if img_pil.mode != 'RGBA' else img_pil
+            except Exception as e:
+                logger.error(f"加载默认参考图失败: {image_path}, 错误: {e}")
+                return None
+        else:
+            logger.warning(f"配置的默认参考图路径不存在或不是一个文件: {image_path}")
+            return None
 
     async def get_user_recent_image_pil_from_cache(self, user_id: str, group_id: str, index: int = 1) -> Optional[PILImage.Image]:
         """
@@ -412,9 +286,9 @@ class GeminiArtist(Star):
     @filter.llm_tool(name="gemini_draw")
     async def gemini_draw(self, event: AstrMessageEvent, prompt: str, image_index: int = 0, reference_bot: bool = False) -> str:
         '''
-        图像生成、修改、处理工具，调用关键词“生成”、“图像处理”、“画”等。
+        图像生成、修改、处理工具，调用关键词"生成"、"图像处理"、"画"等。
         Args:
-            prompt (string): 图像的文本描述。需要包含“生成”、“图片”等关键词。
+            prompt (string): 图像的文本描述。需要包含"生成"、"图片"等关键词。
             image_index (number, optional): 要使用的来自用户历史记录的倒数几张图片作为参考。默认为0 (不使用)。
                                             1表示最新的1张图片，2表示最新的2张，以此类推。
             reference_bot (boolean, optional): 是否参考的是你先前生成的图片(与来自与你聊天记录不同), 默认为 False。
@@ -437,6 +311,7 @@ class GeminiArtist(Star):
 
         all_text = prompt.strip()
         all_images_pil: List[PILImage.Image] = []
+        used_default_image = False # 新增：标记是否使用了默认参考图
 
         # 优先处理回复消息中的图片
         replied_image_pil: Optional[PILImage.Image] = None
@@ -519,6 +394,14 @@ class GeminiArtist(Star):
             
             logger.info(f"成功从缓存加载了 {fetched_count} 张参考图片。")
 
+        # 如果没有任何用户提供的参考图，则尝试加载默认参考图
+        if not all_images_pil and self.enable_base_reference_image:
+            base_image = self._load_base_reference_image()
+            if base_image:
+                all_images_pil.append(base_image)
+                used_default_image = True # 设置标记
+                logger.info("已使用默认参考图。")
+
         if not all_text and not all_images_pil:
             event.plain_result("请提供文本描述，或通过回复图片/指定图片索引及可选的参考用户来提供有效的参考图片。")
             event.stop_event()
@@ -566,17 +449,17 @@ class GeminiArtist(Star):
                     if img_path and os.path.exists(img_path) and os.path.getsize(img_path) > 0:
                         chain.append(Image.fromFileSystem(img_path))
                 if chain:
-                    # await self.add_response_to_conversation(text_response, image_paths, event)
-                    # image_urls_for_llm_request = []
-                    # for img_path in image_paths:
-                    #     if img_path and os.path.exists(img_path) and os.path.getsize(img_path) > 0:
-                    #         image_urls_for_llm_request.append(self.image_to_base64_data_url(img_path))
+                    # 构建给LLM的反馈信息
+                    llm_feedback = f"你生成了 {len(image_paths)} 张图片。"
+                    if used_default_image:
+                        llm_feedback += "由于用户没有提供参考图，你使用了插件预设的默认参考图进行创作。"
+                    llm_feedback += ("这些图片已经发送给用户，并且用户可以通过图片索引（例如，image_index=1 代表最新生成的这张/这些图片）来引用它们进行后续操作。"
+                                     "请根据用户的原始意图和这些新生成的图文内容继续对话。")
+
                     tool_output_data = {
                         "generated_text": text_response,
                         "number_of_images_generated": len(image_paths),
-                        "user_instruction_for_llm": (f"你生成了 {len(image_paths)} 张图片"
-                    "这些图片已经发送给用户，并且用户可以通过图片索引（例如，image_index=1 代表最新生成的这张/这些图片）来引用它们进行后续操作。"
-                    "请根据用户的原始意图和这些新生成的图文内容继续对话。" )
+                        "user_instruction_for_llm": llm_feedback
                         }
                             # 工具的返回值应该是这个JSON字符串
                             # 当LLM调用此工具后，这个字符串会作为工具结果进入LLM的上下文
@@ -629,12 +512,17 @@ class GeminiArtist(Star):
                             content=content
                         ))
                 if ns:
+                    # 构建给LLM的反馈信息
+                    llm_feedback = f"你生成了 {len(image_paths)} 张图片。"
+                    if used_default_image:
+                        llm_feedback += "由于用户没有提供参考图，你使用了插件预设的默认参考图进行创作。"
+                    llm_feedback += ("这些图片已经发送给用户，并且用户可以通过图片索引（例如，image_index=1 代表最新生成的这张/这些图片）来引用它们进行后续操作。"
+                                     "请根据用户的原始意图和这些新生成的图文内容继续对话。")
+
                     tool_output_data = {
                         "generated_text": text_response,
                         "number_of_images_generated": len(image_paths),
-                        "user_instruction_for_llm": (f"你生成了 {len(image_paths)} 张图片"
-                    "这些图片已经发送给用户，并且用户可以通过图片索引（例如，image_index=1 代表最新生成的这张/这些图片）来引用它们进行后续操作。"
-                    "请根据用户的原始意图和这些新生成的图文内容继续对话。")
+                        "user_instruction_for_llm": llm_feedback
                     }
                     yield json.dumps(tool_output_data, ensure_ascii=False)
                     yield event.chain_result([ns])
@@ -755,7 +643,7 @@ class GeminiArtist(Star):
                     # 旧版使用 download_image_by_url，返回本地路径
                     # 然后用 PILImage.open 打开。
                     # 新版有 download_pil_image_from_url 直接返回 PIL Image。
-                    # 为了保持“整块添加”，我们暂时用旧的方式，或者适配到新的。
+                    # 为了保持"整块添加"，我们暂时用旧的方式，或者适配到新的。
                     # 适配到新的：
                     pil_img = await self.download_pil_image_from_url(msg_component.url, "用户为/draw会话发送的图片")
                     if pil_img:
@@ -816,6 +704,13 @@ class GeminiArtist(Star):
             # 清理会话状态
             del self.waiting_users[current_session_key]
             del self.user_inputs[current_session_key]
+
+            # 如果没有任何用户提供的参考图，则尝试加载默认参考图
+            if not all_pil_images_for_api and self.enable_base_reference_image:
+                base_image = self._load_base_reference_image()
+                if base_image:
+                    all_pil_images_for_api.append(base_image)
+                    logger.info("已使用默认参考图。")
 
             if not final_prompt_text and not all_pil_images_for_api:
                 yield event.plain_result("您没有提供任何文本描述或图片内容给 /draw 会话。")

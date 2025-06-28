@@ -29,6 +29,8 @@
     *   `random_api_key_selection`: (可选)布尔值，默认为 `false` (顺序轮询API Key)。设置为 `true` 时，将从 `api_key` 列表中随机选择一个Key进行调用。
     *   `temp_cleanup_interval_seconds`: (可选) 后台定时清理临时目录的间隔时间（秒）。`0` 表示禁用定时清理。默认为 `21600` (6小时)。
     *   `temp_cleanup_files_older_than_seconds`: (可选) 清理时，将清理临时目录中存放超过此时间（秒）的文件。默认为 `259200` (3天)。
+    *   `enable_base_reference_image`: (可选)布尔值，默认为 `false`。启用后，在没有提供任何其他参考图时，将使用下面配置的默认图片作为生图参考。
+    *   `base_reference_image_path`: (可选)字符串。默认参考图片的本地路径。请使用绝对路径或相对于AstrBot根目录的路径 (例如: `data/my_style.png`)。
 3.  **网络代理** (如果需要)：如果您无法直接访问 Google API (`https://generativelanguage.googleapis.com`)，请确保您的Astrbot配置了正确的网络代理，或者通过 `api_base_url` 配置项将API地址替换为您的反代地址。
 
 
@@ -54,6 +56,9 @@
 [AstrBot 官方文档](https://astrbot.app)
 
 ## 更新日志
+
+### v1.4.0
+-   新增"默认参考图"功能：可在插件配置中指定一张默认图片，当用户未提供任何参考图时，将自动使用该图片进行创作，方便统一风格。
 
 ##### v1.3.3
 -   恢复了旧版本的指令调用方式（此方式的生成内容不会进入上下文，但仍然会加入bot生成图片的缓存中）
