@@ -2,6 +2,7 @@
 
 本插件能够让您便捷使用 Google的 `gemini-2.0-flash-exp` 、`gemini-2.0-flash-exp-image-generation`、`gemini-2.0-flash-preview-image-generation`等模型进行图像生成(本人已知的Gemini免费api能够使用的三种生图模型，性能区别未知)。
 
+>由于框架更新，v3.5.17能够正常使用；v3.5.18函数调用无法发送任何信息；v3.5.19能够收到消息与图片，但不能正确处理返回给llm的工具调用结果，而是直接发送给用户。
 >注意：本插件仅在aicoqhttp协议下的QQ平台进行过测试，其他协议平台可用性未知，欢迎反馈。
 
 ## 🚀 使用方法
