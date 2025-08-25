@@ -2,7 +2,7 @@ from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 from astrbot.api.all import *
-from astrbot.api.message_components import Node, Plain, Image ,Nodes
+from astrbot.api.message_components import Node, Plain, Image, Nodes, Reply, BaseMessageComponent
 import asyncio
 from io import BytesIO
 import time
@@ -13,11 +13,9 @@ from PIL import Image as PILImage
 from google.genai.types import HttpOptions
 from astrbot.core.utils.io import download_file
 import functools
-from typing import List, Optional, Dict, Tuple
+from typing import List, Optional, Dict, Tuple, AsyncGenerator, Any
 from collections import deque
 import base64
-import time
-from astrbot.core.conversation_mgr import Conversation
 import json
 from pathlib import Path
 import re
@@ -32,7 +30,7 @@ class GeminiArtist(Star):
         self.config = config
         api_key_list_from_config = config.get("api_key", [])
         self.api_base_url_from_config = config.get("api_base_url", "https://generativelanguage.googleapis.com")
-        self.model_name_from_config = config.get("model_name", "gemini-2.0-flash-exp")
+        self.model_name_from_config = config.get("model", "gemini-2.0-flash-exp")
         self.group_whitelist = config.get("group_whitelist", [])
         self.robot_id_from_config = config.get("robot_self_id") 
         self.random_api_key_selection = config.get("random_api_key_selection", False)
@@ -284,7 +282,7 @@ class GeminiArtist(Star):
                 self.store_user_image(user_id, group_id, msg_component.url, getattr(msg_component, 'file', None))
 
     @filter.llm_tool(name="gemini_draw")
-    async def gemini_draw(self, event: AstrMessageEvent, prompt: str, image_index: int = 0, reference_bot: bool = False) -> str:
+    async def gemini_draw(self, event: AstrMessageEvent, prompt: str, image_index: int = 0, reference_bot: bool = False) -> AsyncGenerator[Any, None]:
         '''
         图像生成、修改、处理工具，调用关键词"生成"、"图像处理"、"画"等。
         Args:
@@ -323,7 +321,7 @@ class GeminiArtist(Star):
                 if hasattr(msg_component, '__dict__'):
                     logger.debug(f"Reply component vars: {vars(msg_component)}")
 
-                source_chain: Optional[List[MessageComponent]] = None
+                source_chain: Optional[List[BaseMessageComponent]] = None
                 # 尝试从回复消息中获取图片链
                 if hasattr(msg_component, 'chain') and isinstance(msg_component.chain, list):
                     source_chain = msg_component.chain
@@ -363,36 +361,35 @@ class GeminiArtist(Star):
             if key_for_cache not in self.image_history_cache or not self.image_history_cache[key_for_cache]:
                 message = f"缓存中未找到用户 {user_id_for_cache_lookup} (上下文 {group_id_for_cache_lookup}) 的图片历史。"
                 logger.warning(message)
+                # 直接跳过获取缓存图片的逻辑
+            else:
+                cached_items_list = list(self.image_history_cache[key_for_cache])
+                # 确保不要请求超过缓存数量的图片
+                actual_num_to_fetch = min(num_images_to_fetch, len(cached_items_list))
 
-            
-            cached_items_list = list(self.image_history_cache[key_for_cache])
-            # 确保不要请求超过缓存数量的图片
-            actual_num_to_fetch = min(num_images_to_fetch, len(cached_items_list))
+                if actual_num_to_fetch == 0:
+                    message = f"用户 {user_id_for_cache_lookup} (上下文 {group_id_for_cache_lookup}) 的图片历史为空，无法按数量 {num_images_to_fetch} 获取参考图。"
+                    logger.warning(message)
 
-            if actual_num_to_fetch == 0:
-                message = f"用户 {user_id_for_cache_lookup} (上下文 {group_id_for_cache_lookup}) 的图片历史为空，无法按数量 {num_images_to_fetch} 获取参考图。"
-                logger.warning(message)
-
-
-            fetched_count = 0
-            # 从最新的开始获取 (倒数第1, 倒数第2, ..., 倒数第 actual_num_to_fetch)
-            for i in range(1, actual_num_to_fetch + 1):
-                pil_image_from_cache = await self.get_user_recent_image_pil_from_cache(
-                    user_id_for_cache_lookup,
-                    group_id_for_cache_lookup,
-                    i 
-                )
-                if pil_image_from_cache:
-                    all_images_pil.append(pil_image_from_cache)
-                    fetched_count +=1
-                else:
-                    logger.warning(f"未能加载用户 {user_id_for_cache_lookup} (上下文 {group_id_for_cache_lookup}) 的倒数第 {i} 张图片。")
-            
-            if fetched_count == 0 and num_images_to_fetch > 0 : # 如果指定要图但一张都没取到
-                message = f"尝试获取最新的 {num_images_to_fetch} 张图片，但未能成功加载任何一张。"
-                logger.warning(message)
-            
-            logger.info(f"成功从缓存加载了 {fetched_count} 张参考图片。")
+                fetched_count = 0
+                # 从最新的开始获取 (倒数第1, 倒数第2, ..., 倒数第 actual_num_to_fetch)
+                for i in range(1, actual_num_to_fetch + 1):
+                    pil_image_from_cache = await self.get_user_recent_image_pil_from_cache(
+                        user_id_for_cache_lookup,
+                        group_id_for_cache_lookup,
+                        i 
+                    )
+                    if pil_image_from_cache:
+                        all_images_pil.append(pil_image_from_cache)
+                        fetched_count +=1
+                    else:
+                        logger.warning(f"未能加载用户 {user_id_for_cache_lookup} (上下文 {group_id_for_cache_lookup}) 的倒数第 {i} 张图片。")
+                
+                if fetched_count == 0 and num_images_to_fetch > 0 : # 如果指定要图但一张都没取到
+                    message = f"尝试获取最新的 {num_images_to_fetch} 张图片，但未能成功加载任何一张。"
+                    logger.warning(message)
+                
+                logger.info(f"成功从缓存加载了 {fetched_count} 张参考图片。")
 
         # 如果没有任何用户提供的参考图，则尝试加载默认参考图
         if not all_images_pil and self.enable_base_reference_image:
@@ -403,8 +400,9 @@ class GeminiArtist(Star):
                 logger.info("已使用默认参考图。")
 
         if not all_text and not all_images_pil:
-            event.plain_result("请提供文本描述，或通过回复图片/指定图片索引及可选的参考用户来提供有效的参考图片。")
+            yield event.plain_result("请提供文本描述，或通过回复图片/指定图片索引及可选的参考用户来提供有效的参考图片。")
             event.stop_event()
+            return
 
         yield event.plain_result("正在生成图片，请稍候...")
 
@@ -416,7 +414,8 @@ class GeminiArtist(Star):
             if result is None or not isinstance(result, dict):
                 logger.error(f"gemini_draw: gemini_generate 返回无效结果: {type(result)}")
                 yield event.plain_result("处理图片时发生内部错误。")
-                stop_event()
+                event.stop_event()
+                return
 
             text_response = result.get('text', '').strip()
             image_paths = result.get('image_paths', [])
@@ -439,6 +438,7 @@ class GeminiArtist(Star):
                 logger.warning("gemini_draw: API未返回任何文本或生成的图片内容。")
                 yield event.plain_result("未能从API获取任何内容。")
                 event.stop_event()
+                return
 
             # 如果只有一张图片或没有图片，则直接发送
             if len(image_paths) < 2:
@@ -491,6 +491,7 @@ class GeminiArtist(Star):
 
                 bot_name_for_node = str(self.config.get("bot_name", "绘图助手")).strip() or "绘图助手"
                 ns = Nodes([])
+                paragraphs = []  # 初始化为空列表
                 if text_response:
                     paragraphs = text_response.split('\n\n')
                 if paragraphs:
@@ -499,9 +500,9 @@ class GeminiArtist(Star):
                         ))
                 for idx, img_path in enumerate(image_paths): 
                     if img_path and os.path.exists(img_path) and os.path.getsize(img_path) > 0:
-                        if len(paragraphs) == 1:
+                        if len(paragraphs) <= 1:
                             content = [Plain(""), Image.fromFileSystem(img_path)]
-                        elif idx < len(paragraphs):
+                        elif idx + 1 < len(paragraphs):
                             content = [Plain(paragraphs[idx+1]), Image.fromFileSystem(img_path)]
                         else:
                             content = [Plain(""), Image.fromFileSystem(img_path)]
@@ -788,7 +789,7 @@ class GeminiArtist(Star):
                             content=[Plain(text_response)]
                         ))
                     
-                    for img_path in enumerate(image_paths): 
+                    for img_path in image_paths: 
                         if img_path and os.path.exists(img_path) and os.path.getsize(img_path) > 0:
                             # Optionally add a small text like "图片 {idx+1}"
                             # content_for_node = [Plain(f"图片 {idx+1}/{len(image_paths)}"), Image.fromFileSystem(img_path)]
@@ -821,7 +822,7 @@ class GeminiArtist(Star):
             #    logger.debug(f"collect_user_inputs (/draw): 收到空消息，不含开始指令 (key {current_session_key})，已忽略。")
 
 
-    async def gemini_generate(self, text_prompt: str, images_pil: List[PILImage.Image] = None):
+    async def gemini_generate(self, text_prompt: str, images_pil: Optional[List[PILImage.Image]] = None):
         """
         调用Gemini API生成文本和图片。
         支持多API密钥轮询和随机选择。
@@ -917,6 +918,11 @@ class GeminiArtist(Star):
         插件终止时执行清理操作，包括清空图片缓存和取消后台清理任务。
         """
         logger.info("GeminiArtist: 执行 terminate 清理...")
+        # 清理会话状态
+        if hasattr(self, 'waiting_users'):
+            self.waiting_users.clear()
+        if hasattr(self, 'user_inputs'):
+            self.user_inputs.clear()
         if hasattr(self, 'image_history_cache'):
             self.image_history_cache.clear()
             logger.info("用户图片URL缓存已清空。")
