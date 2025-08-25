@@ -789,7 +789,7 @@ class GeminiArtist(Star):
                             content=[Plain(text_response)]
                         ))
                     
-                    for img_path in enumerate(image_paths): 
+                    for img_path in image_paths: 
                         if img_path and os.path.exists(img_path) and os.path.getsize(img_path) > 0:
                             # Optionally add a small text like "图片 {idx+1}"
                             # content_for_node = [Plain(f"图片 {idx+1}/{len(image_paths)}"), Image.fromFileSystem(img_path)]
