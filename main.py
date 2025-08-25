@@ -2,7 +2,7 @@ from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 from astrbot.api.all import *
-from astrbot.api.message_components import Node, Plain, Image ,Nodes
+from astrbot.api.message_components import Node, Plain, Image, Nodes, Reply, BaseMessageComponent
 import asyncio
 from io import BytesIO
 import time
@@ -321,7 +321,7 @@ class GeminiArtist(Star):
                 if hasattr(msg_component, '__dict__'):
                     logger.debug(f"Reply component vars: {vars(msg_component)}")
 
-                source_chain: Optional[List[MessageComponent]] = None
+                source_chain: Optional[List[BaseMessageComponent]] = None
                 # 尝试从回复消息中获取图片链
                 if hasattr(msg_component, 'chain') and isinstance(msg_component.chain, list):
                     source_chain = msg_component.chain
