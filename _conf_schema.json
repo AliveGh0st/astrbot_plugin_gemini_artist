@@ -65,7 +65,7 @@
     "temp_cleanup_files_older_than_seconds": {
         "type": "int",
         "name": "定时清理 - 文件保留时长",
-        "description": "清理时，将清理临时目录中存放超过此外挂钩（秒）的文件。",
+        "description": "清理时，将清理临时目录中存放超过此时长（秒）的文件。",
         "hint": "默认为3天，最小值为1小时",
         "default": 259200,
         "min": 3600 
