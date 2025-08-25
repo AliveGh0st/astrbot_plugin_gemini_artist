@@ -13,7 +13,7 @@ from PIL import Image as PILImage
 from google.genai.types import HttpOptions
 from astrbot.core.utils.io import download_file
 import functools
-from typing import List, Optional, Dict, Tuple
+from typing import List, Optional, Dict, Tuple, AsyncGenerator, Any
 from collections import deque
 import base64
 import json
@@ -282,7 +282,7 @@ class GeminiArtist(Star):
                 self.store_user_image(user_id, group_id, msg_component.url, getattr(msg_component, 'file', None))
 
     @filter.llm_tool(name="gemini_draw")
-    async def gemini_draw(self, event: AstrMessageEvent, prompt: str, image_index: int = 0, reference_bot: bool = False) -> str:
+    async def gemini_draw(self, event: AstrMessageEvent, prompt: str, image_index: int = 0, reference_bot: bool = False) -> AsyncGenerator[Any, None]:
         '''
         图像生成、修改、处理工具，调用关键词"生成"、"图像处理"、"画"等。
         Args:
