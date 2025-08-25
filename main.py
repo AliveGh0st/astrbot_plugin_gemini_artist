@@ -919,6 +919,11 @@ class GeminiArtist(Star):
         插件终止时执行清理操作，包括清空图片缓存和取消后台清理任务。
         """
         logger.info("GeminiArtist: 执行 terminate 清理...")
+        # 清理会话状态
+        if hasattr(self, 'waiting_users'):
+            self.waiting_users.clear()
+        if hasattr(self, 'user_inputs'):
+            self.user_inputs.clear()
         if hasattr(self, 'image_history_cache'):
             self.image_history_cache.clear()
             logger.info("用户图片URL缓存已清空。")
