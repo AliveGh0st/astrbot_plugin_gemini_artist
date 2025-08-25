@@ -414,7 +414,7 @@ class GeminiArtist(Star):
             if result is None or not isinstance(result, dict):
                 logger.error(f"gemini_draw: gemini_generate 返回无效结果: {type(result)}")
                 yield event.plain_result("处理图片时发生内部错误。")
-                stop_event()
+                event.stop_event()
 
             text_response = result.get('text', '').strip()
             image_paths = result.get('image_paths', [])
