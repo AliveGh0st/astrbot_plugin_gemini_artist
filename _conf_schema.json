@@ -11,6 +11,11 @@
         "hint": "可以填写你的反代地址,默认为官方API基础URL",
         "default": "https://generativelanguage.googleapis.com"
     },
+    "enable_hinting": {
+        "description": "是否启用生图是提示",
+        "type": "bool",
+        "default": true
+    },
     "model": {
         "description": "进行生图的模型,不在可选的可以到插件代码中进行修改",
         "type": "string",

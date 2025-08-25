@@ -52,6 +52,8 @@ class GeminiArtist(Star):
         os.makedirs(self.plugin_temp_base_dir, exist_ok=True)
         self.temp_dir = self.plugin_temp_base_dir
 
+        self.enable_hinting = self.config.get("enable_hinting", True)
+
         self.api_keys = [
             key.strip()
             for key in api_key_list_from_config
@@ -404,7 +406,8 @@ class GeminiArtist(Star):
             event.stop_event()
             return
 
-        yield event.plain_result("正在生成图片，请稍候...")
+        if self.enable_hinting:
+            yield event.plain_result("正在生成图片，请稍候...")
 
         try:
             logger.debug(f"gemini_draw: 调用 gemini_generate (文本: '{all_text[:50]}...', PIL图片数: {len(all_images_pil)})")
