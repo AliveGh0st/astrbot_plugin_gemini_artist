@@ -12,7 +12,7 @@
         "default": "https://generativelanguage.googleapis.com"
     },
     "enable_hinting": {
-        "description": "是否启用生图是提示",
+        "description": "是否启用生图时提示",
         "type": "bool",
         "default": true
     },
