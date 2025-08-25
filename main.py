@@ -16,7 +16,6 @@ import functools
 from typing import List, Optional, Dict, Tuple
 from collections import deque
 import base64
-from astrbot.core.conversation_mgr import Conversation
 import json
 from pathlib import Path
 import re
