@@ -403,6 +403,7 @@ class GeminiArtist(Star):
         if not all_text and not all_images_pil:
             event.plain_result("请提供文本描述，或通过回复图片/指定图片索引及可选的参考用户来提供有效的参考图片。")
             event.stop_event()
+            return
 
         yield event.plain_result("正在生成图片，请稍候...")
 
@@ -415,6 +416,7 @@ class GeminiArtist(Star):
                 logger.error(f"gemini_draw: gemini_generate 返回无效结果: {type(result)}")
                 yield event.plain_result("处理图片时发生内部错误。")
                 event.stop_event()
+                return
 
             text_response = result.get('text', '').strip()
             image_paths = result.get('image_paths', [])
@@ -437,6 +439,7 @@ class GeminiArtist(Star):
                 logger.warning("gemini_draw: API未返回任何文本或生成的图片内容。")
                 yield event.plain_result("未能从API获取任何内容。")
                 event.stop_event()
+                return
 
             # 如果只有一张图片或没有图片，则直接发送
             if len(image_paths) < 2:
