@@ -501,9 +501,9 @@ class GeminiArtist(Star):
                         ))
                 for idx, img_path in enumerate(image_paths): 
                     if img_path and os.path.exists(img_path) and os.path.getsize(img_path) > 0:
-                        if len(paragraphs) == 1:
+                        if len(paragraphs) <= 1:
                             content = [Plain(""), Image.fromFileSystem(img_path)]
-                        elif idx < len(paragraphs):
+                        elif idx + 1 < len(paragraphs):
                             content = [Plain(paragraphs[idx+1]), Image.fromFileSystem(img_path)]
                         else:
                             content = [Plain(""), Image.fromFileSystem(img_path)]
