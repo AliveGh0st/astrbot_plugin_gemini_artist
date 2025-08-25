@@ -32,7 +32,7 @@ class GeminiArtist(Star):
         self.config = config
         api_key_list_from_config = config.get("api_key", [])
         self.api_base_url_from_config = config.get("api_base_url", "https://generativelanguage.googleapis.com")
-        self.model_name_from_config = config.get("model_name", "gemini-2.0-flash-exp")
+        self.model_name_from_config = config.get("model", "gemini-2.0-flash-exp")
         self.group_whitelist = config.get("group_whitelist", [])
         self.robot_id_from_config = config.get("robot_self_id") 
         self.random_api_key_selection = config.get("random_api_key_selection", False)
