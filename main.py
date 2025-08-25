@@ -819,7 +819,7 @@ class GeminiArtist(Star):
             #    logger.debug(f"collect_user_inputs (/draw): 收到空消息，不含开始指令 (key {current_session_key})，已忽略。")
 
 
-    async def gemini_generate(self, text_prompt: str, images_pil: List[PILImage.Image] = None):
+    async def gemini_generate(self, text_prompt: str, images_pil: Optional[List[PILImage.Image]] = None):
         """
         调用Gemini API生成文本和图片。
         支持多API密钥轮询和随机选择。
