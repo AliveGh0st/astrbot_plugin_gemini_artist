@@ -492,6 +492,7 @@ class GeminiArtist(Star):
 
                 bot_name_for_node = str(self.config.get("bot_name", "绘图助手")).strip() or "绘图助手"
                 ns = Nodes([])
+                paragraphs = []  # 初始化为空列表
                 if text_response:
                     paragraphs = text_response.split('\n\n')
                 if paragraphs:
