@@ -401,7 +401,7 @@ class GeminiArtist(Star):
                 logger.info("已使用默认参考图。")
 
         if not all_text and not all_images_pil:
-            event.plain_result("请提供文本描述，或通过回复图片/指定图片索引及可选的参考用户来提供有效的参考图片。")
+            yield event.plain_result("请提供文本描述，或通过回复图片/指定图片索引及可选的参考用户来提供有效的参考图片。")
             event.stop_event()
             return
 
