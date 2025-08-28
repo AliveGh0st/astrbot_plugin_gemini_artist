@@ -1,4 +1,14 @@
 {
+    "api_type": {
+        "description": "API类型",
+        "type": "string",
+        "hint": "选择使用的API类型",
+        "default": "Google",
+        "options": [
+            "Google",
+            "OpenRouter"
+        ]
+    },
     "api_key": {
         "description": "Gemini API密钥",
         "type": "list",
@@ -20,12 +30,7 @@
         "description": "进行生图的模型,不在可选的可以到插件代码中进行修改",
         "type": "string",
         "hint": "选择要使用的生图模型",
-        "default": "gemini-2.0-flash-exp",
-        "options": [
-            "gemini-2.0-flash-exp",
-            "gemini-2.0-flash-exp-image-generation",
-            "gemini-2.0-flash-preview-image-generation"
-        ]
+        "default": "gemini-2.0-flash-exp"
     },
     "max_cached_images": {
         "description": "缓存的图片url数量最大值",
