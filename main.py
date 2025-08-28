@@ -290,12 +290,11 @@ class GeminiArtist(Star):
     @filter.llm_tool(name="gemini_draw")
     async def gemini_draw(self, event: AstrMessageEvent, prompt: str, image_index: int = 0, reference_bot: bool = False) -> AsyncGenerator[Any, None]:
         '''
-        图像生成、修改、处理工具，调用关键词"生成"、"图像处理"、"画"等。
+        AI图像生成与编辑工具。支持文生图、图生图、图像编辑等多种功能。
         Args:
-            prompt (string): 图像的文本描述。需要包含"生成"、"图片"等关键词。
-            image_index (number, optional): 要使用的来自用户历史记录的倒数几张图片作为参考。默认为0 (不使用)。
-                                            1表示最新的1张图片，2表示最新的2张，以此类推。
-            reference_bot (boolean, optional): 是否参考的是你先前生成的图片(与来自与你聊天记录不同), 默认为 False。
+            prompt (string): 图像生成或编辑的详细描述。
+            image_index (number, optional): 引用历史图片数量。0=不引用，1=引用最新1张，2=引用最新2张，依此类推。默认为0。
+            reference_bot (boolean, optional): 是否引用机器人之前生成的图片。True=引用机器人生成的，False=引用用户发送的。默认为False。
         '''
         if not self.api_keys:
             yield event.plain_result("请联系管理员配置Gemini API密钥。")
@@ -409,6 +408,10 @@ class GeminiArtist(Star):
             yield event.plain_result("请提供文本描述，或通过回复图片/指定图片索引及可选的参考用户来提供有效的参考图片。")
             event.stop_event()
             return
+
+        # 在提示词前添加英文前缀
+        if all_text:
+            all_text = f"Generate/modify images using the following prompt: {all_text}"
 
         if self.enable_hinting:
             yield event.plain_result("正在生成图片，请稍候...")
