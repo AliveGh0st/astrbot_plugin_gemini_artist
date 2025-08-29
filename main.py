@@ -23,14 +23,14 @@ import re
 
 
 
-@register("gemini_artist_plugin", "nichinichisou", "基于 Google Gemini 和 OpenAI 格式 API 的AI绘画插件", "1.5.0")
+@register("gemini_artist_plugin", "nichinichisou", "基于 Google Gemini 和 OpenRouter 格式 API 的AI绘画插件", "1.5.0")
 class GeminiArtist(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
 
         self.config = config
         
-        # API 类型配置："google" 或 "openai" 
+        # API 类型配置："Google" 或 "OpenRouter" 
         self.api_type = config.get("api_type", "Google")
         api_key_list_from_config = config.get("api_key", [])
         self.api_base_url_from_config = config.get("api_base_url", "https://generativelanguage.googleapis.com")
@@ -292,7 +292,7 @@ class GeminiArtist(Star):
         '''
         AI图像生成与编辑工具。支持文生图、图生图、图像编辑等多种功能。
         Args:
-            prompt (string): 图像生成或编辑的详细描述。
+            prompt (string): 图像生成或编辑的详细描述，当用户使用"再画一张"、"重新生成一张"时使用之前绘画的提示词。
             image_index (number, optional): 引用历史图片数量。0=不引用，1=引用最新1张，2=引用最新2张，依此类推。默认为0。
             reference_bot (boolean, optional): 是否引用机器人之前生成的图片。True=引用机器人生成的，False=引用用户发送的。默认为False。
         '''
@@ -409,7 +409,7 @@ class GeminiArtist(Star):
             event.stop_event()
             return
 
-        # 在提示词前添加英文前缀
+        # 在提示词前添加英文前缀,提高调用绘画成功率
         if all_text:
             all_text = f"Generate/modify images using the following prompt: {all_text}"
 
@@ -417,7 +417,7 @@ class GeminiArtist(Star):
             yield event.plain_result("正在生成图片，请稍候...")
 
         try:
-            logger.debug(f"gemini_draw: 调用 API 生成 (API类型: {self.api_type}, 文本: '{all_text[:50]}...', PIL图片数: {len(all_images_pil)})")
+            logger.debug(f"gemini_draw: 调用 API 生成 (API类型: {self.api_type}, 文本: '{all_text[:100]}...', PIL图片数: {len(all_images_pil)})")
             
             # 根据API类型调用相应的生成方法
             if self.api_type == "OpenRouter":
@@ -848,7 +848,7 @@ class GeminiArtist(Star):
     async def openrouter_generate(self, text_prompt: str, images_pil: Optional[List[PILImage.Image]] = None):
         """
         调用OpenAI格式的API生成图片。
-        支持标准 OpenAI API 和 OpenRouter 等使用 chat completions 的服务。
+        支持标准 OpenRouter 等使用 chat completions 的服务。
         """
         if not self.api_keys:
             raise ValueError("没有配置API密钥 (api_keys)")
@@ -865,7 +865,7 @@ class GeminiArtist(Star):
         for attempt_num, key_idx_to_use in enumerate(key_indices_to_try):
             current_key_to_try = self.api_keys[key_idx_to_use]
             try:
-                logger.info(f"openai_generate: 尝试API密钥索引 {key_idx_to_use} (尝试 {attempt_num + 1}/{max_retries})")
+                logger.info(f"openrouter_generate: 尝试API密钥索引 {key_idx_to_use} (尝试 {attempt_num + 1}/{max_retries})")
                 
                 # 创建 OpenAI 客户端
                 # 确保 base_url 格式正确
@@ -926,7 +926,7 @@ class GeminiArtist(Star):
                     
                     # 重试机制：能需要多次尝试才能生成图片
                     max_generation_retries = 5
-                    retry_delay = 2  # 秒
+                    retry_delay = 3  # 秒
                     
                     for generation_attempt in range(max_generation_retries):
                         if generation_attempt > 0:
@@ -1017,17 +1017,17 @@ class GeminiArtist(Star):
                 return result
                     
             except Exception as e:
-                logger.error(f"openai_generate: API处理失败 (密钥 {key_idx_to_use}): {str(e)}", exc_info=True)
+                logger.error(f"openrouter_generate: API处理失败 (密钥 {key_idx_to_use}): {str(e)}", exc_info=True)
                 last_exception = e
                 
             if attempt_num < max_retries - 1:
-                logger.info(f"openai_generate: 尝试下个API密钥 (下个索引: {key_indices_to_try[attempt_num+1]})")
+                logger.info(f"openrouter_generate: 尝试下个API密钥 (下个索引: {key_indices_to_try[attempt_num+1]})")
             else:
-                logger.error("openai_generate: 所有API密钥均尝试失败。")
+                logger.error("openrouter_generate: 所有API密钥均尝试失败。")
         
         if last_exception:
             raise last_exception
-        logger.error("openai_generate: 未能从API获取数据且无明确异常。")
+        logger.error("openrouter_generate: 未能从API获取数据且无明确异常。")
         raise ValueError("OpenAI API处理失败，无可用密钥或未记录错误。")
 
     async def gemini_generate(self, text_prompt: str, images_pil: Optional[List[PILImage.Image]] = None):
